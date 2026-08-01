@@ -2,7 +2,7 @@ CREATE DATABASE revoshop_db;
 
 CREATE TABLE users (
     id            SERIAL primary key, -- YOUR DECISION: primary key, auto-increment
-    username      VARCHAR(100) unique not null, -- YOUR DECISION: short text, required
+    username      VARCHAR(200) unique not null, -- YOUR DECISION: short text, required
     email         VARCHAR(50) unique not null, -- YOUR DECISION: text, required, max 255 chars
     password_hash VARCHAR(255) not null, -- YOUR DECISION: text, required (stores hashed password)
     is_active     BOOLEAN default TRUE, -- YOUR DECISION: true/false flag, optional
@@ -17,12 +17,12 @@ CREATE TABLE categories (
 
 CREATE TABLE products (
     id             SERIAL primary key, -- YOUR DECISION: primary key, auto-increment
-    category_id	   INTEGER unique not null,
+    category_id	   INTEGER not null,
     name           VARCHAR(200) not null, -- YOUR DECISION: short text, required
     description    TEXT, -- YOUR DECISION: long text, optional
     price          NUMERIC(11, 2) not null, -- YOUR DECISION: exact decimal, required
     stock_quantity INTEGER not null, -- YOUR DECISION: whole number, required
-    created_at     TIMESTAMP default NOW() -- YOUR DECISION: date + time, optional (auto-set)
+    created_at     TIMESTAMP default NOW(), -- YOUR DECISION: date + time, optional (auto-set)
     constraint fk_products_category foreign key (category_id) REFERENCES categories(id) ON DELETE RESTRICT
 );
 
