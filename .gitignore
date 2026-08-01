@@ -1,0 +1,10 @@
+# Ignoring the DBeaver internal settings folder
+.dbeaver/
+.dbeaver-data-sources.xml
+.settings/
+.project
+
+# Ignoring local junk log files
+*.log
+.DS_Store
+Thumbs.db
