@@ -1,10 +1,29 @@
-# Ignoring the DBeaver internal settings folder
-.dbeaver/
-.dbeaver-data-sources.xml
-.settings/
-.project
+# Environment variables and local secrets
+.env
+.env.*
+!.env.example
 
-# Ignoring local junk log files
+# Database exports and backups
+*.backup
+*.dump
+*.sql.bak
+
+# Logs and temporary files
 *.log
+*.tmp
+*.swp
+*~
+
+# DBeaver local workspace files
+.dbeaver/
+.metadata/
+
+# IDE settings
+.vscode/
+.idea/
+*.code-workspace
+
+# Operating system files
 .DS_Store
 Thumbs.db
+Desktop.ini
