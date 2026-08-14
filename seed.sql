@@ -33,54 +33,74 @@ VALUES
 
 INSERT INTO orders (user_id, total_price, status)
 VALUES
-    (1, 905000.00, 'COMPLETED'), -- Sepatu Lari (850k) + Kaus Kaki (55k)
-    (2, 195000.00, 'PENDING'),   -- Kaus Polos (75k) + Topi Baseball (120k)
-    (3, 375000.00, 'PROCESSING'),-- Celana Jogger (195k) + Ikat Pinggang (180k)
-    (4, 450000.00, 'COMPLETED'), -- Jaket Windbreaker (450k)
-    (5, 455000.00, 'SHIPPED'),    -- Tas Ransel (320k) + Kacamata Hitam (135k)
-    (6, 395000.00, 'COMPLETED'), -- Jam Tangan (275k) + Topi Baseball (120k)
-    (7, 205000.00, 'PENDING'),   -- 2x Kaus Polos (150k) + Kaus Kaki (55k)
-    (8, 850000.00, 'COMPLETED'), -- Sepatu Lari (850k)
-    (9, 645000.00, 'CANCELLED'), -- Celana Jogger (195k) + Jaket Windbreaker (450k)
-    (10, 315000.00, 'SHIPPED');  -- Ikat Pinggang (180k) + Kacamata Hitam (135k)
+    (1, 905000.00, 'COMPLETED'),  -- Nike Air Max Running Shoes + Sports Socks 3-Pack
+    (2, 195000.00, 'PENDING'),    -- Plain Cotton Combed T-Shirt + Unisex Baseball Cap
+    (3, 375000.00, 'PROCESSING'), -- Fleece Jogger Pants + Leather Belt
+    (4, 450000.00, 'COMPLETED'),  -- Windbreaker Jacket
+    (5, 455000.00, 'SHIPPED'),    -- Waterproof Backpack + UV400 Sunglasses
+    (6, 395000.00, 'COMPLETED'),  -- Digital Sports Watch + Unisex Baseball Cap
+    (7, 205000.00, 'PENDING'),    -- 2x Plain Cotton Combed T-Shirt + Sports Socks 3-Pack
+    (8, 850000.00, 'COMPLETED'),  -- Nike Air Max Running Shoes
+    (9, 645000.00, 'CANCELLED'),  -- Fleece Jogger Pants + Windbreaker Jacket
+    (10, 315000.00, 'SHIPPED'),   -- Leather Belt + UV400 Sunglasses
+    (1, 195000.00, 'PROCESSING'), -- T-Shirt + Cap
+    (1, 320000.00, 'SHIPPED'),    -- Backpack
+    (2, 305000.00, 'COMPLETED'),  -- Jogger Pants + 2x Socks
+    (2, 315000.00, 'CANCELLED'),  -- Sunglasses + Belt
+    (3, 850000.00, 'PENDING'),    -- Running Shoes
+    (3, 425000.00, 'COMPLETED'),  -- 2x T-Shirt + Watch
+    (4, 375000.00, 'SHIPPED'),    -- Backpack + Socks
+    (4, 255000.00, 'PROCESSING'), -- Cap + Sunglasses
+    (5, 390000.00, 'COMPLETED'),  -- 2x Jogger Pants
+    (5, 630000.00, 'PENDING'),    -- Jacket + Belt
+    (6, 970000.00, 'SHIPPED'),    -- Running Shoes + Cap
+    (6, 240000.00, 'COMPLETED'),  -- T-Shirt + 3x Socks
+    (7, 455000.00, 'PENDING'),    -- Backpack + Sunglasses
+    (7, 455000.00, 'PROCESSING'), -- Watch + Belt
+    (8, 315000.00, 'COMPLETED'),  -- Jogger Pants + Cap
+    (8, 225000.00, 'CANCELLED'),  -- 3x T-Shirt
+    (9, 505000.00, 'SHIPPED'),    -- Jacket + Socks
+    (9, 985000.00, 'COMPLETED'),  -- Running Shoes + Sunglasses
+    (10, 595000.00, 'PENDING'),   -- Backpack + Watch
+    (10, 420000.00, 'PROCESSING');-- 2x Cap + Belt
 
-INSERT INTO order_items (order_id, product_id, quantity)
-VALUES
-    -- Order 1 (Total: 905k)
-    (1, 1, 1), -- 1x Sepatu Lari Nike (850k)
-    (1, 6, 1), -- 1x Kaus Kaki Olahraga (55k)
-
-    -- Order 2 (Total: 195k)
-    (2, 2, 1), -- 1x Kaus Polos (75k)
-    (2, 4, 1), -- 1x Topi Baseball (120k)
-
-    -- Order 3 (Total: 375k)
-    (3, 3, 1), -- 1x Celana Jogger (195k)
-    (3, 10, 1),-- 1x Ikat Pinggang Kulit (180k)
-
-    -- Order 4 (Total: 450k)
-    (4, 5, 1), -- 1x Jaket Windbreaker (450k)
-
-    -- Order 5 (Total: 455k)
-    (5, 7, 1), -- 1x Tas Ransel (320k)
-    (5, 8, 1), -- 1x Kacamata Hitam (135k)
-
-    -- Order 6 (Total: 395k)
-    (6, 9, 1), -- 1x Jam Tangan Digital (275k)
-    (6, 4, 1), -- 1x Topi Baseball (120k)
-
-    -- Order 7 (Total: 205k)
-    (7, 2, 2), -- 2x Kaus Polos (150k)
-    (7, 6, 1), -- 1x Kaus Kaki Olahraga (55k)
-
-    -- Order 8 (Total: 850k)
-    (8, 1, 1), -- 1x Sepatu Lari Nike (850k)
-
-    -- Order 9 (Total: 645k)
-    (9, 3, 1), -- 1x Celana Jogger (195k)
-    (9, 5, 1), -- 1x Jaket Windbreaker (450k)
-
-    -- Order 10 (Total: 315k)
-    (10, 10, 1),-- 1x Ikat Pinggang Kulit (180k)
-    (10, 8, 1); -- 1x Kacamata Hitam (135k)
-    
+INSERT INTO order_items (order_id, product_id, quantity, unit_price)
+SELECT
+    order_data.order_id,
+    order_data.product_id,
+    order_data.quantity,
+    products.price AS unit_price
+FROM (
+    VALUES
+        (1, 1, 1), (1, 6, 1),
+        (2, 2, 1), (2, 4, 1),
+        (3, 3, 1), (3, 10, 1),
+        (4, 5, 1),
+        (5, 7, 1), (5, 8, 1),
+        (6, 9, 1), (6, 4, 1),
+        (7, 2, 2), (7, 6, 1),
+        (8, 1, 1),
+        (9, 3, 1), (9, 5, 1),
+        (10, 10, 1), (10, 8, 1),
+        (11, 2, 1), (11, 4, 1),
+        (12, 7, 1),
+        (13, 3, 1), (13, 6, 2),
+        (14, 8, 1), (14, 10, 1),
+        (15, 1, 1),
+        (16, 2, 2), (16, 9, 1),
+        (17, 7, 1), (17, 6, 1),
+        (18, 4, 1), (18, 8, 1),
+        (19, 3, 2),
+        (20, 5, 1), (20, 10, 1),
+        (21, 1, 1), (21, 4, 1),
+        (22, 2, 1), (22, 6, 3),
+        (23, 7, 1), (23, 8, 1),
+        (24, 9, 1), (24, 10, 1),
+        (25, 3, 1), (25, 4, 1),
+        (26, 2, 3),
+        (27, 5, 1), (27, 6, 1),
+        (28, 1, 1), (28, 8, 1),
+        (29, 7, 1), (29, 9, 1),
+        (30, 4, 2), (30, 10, 1)
+) AS order_data(order_id, product_id, quantity)
+JOIN products ON products.id = order_data.product_id;
