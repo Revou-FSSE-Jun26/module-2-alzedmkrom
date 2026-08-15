@@ -1,0 +1,24 @@
+# RevoShop - Checkpoint 2 dependencies
+# Versions pinned to what resolved and installed locally (Python 3.14.6, Windows).
+# Install with: pip install -r requirements.txt
+
+# Web framework
+Flask==3.1.3
+
+# ORM integration
+Flask-SQLAlchemy==3.1.1
+
+# Core ORM (transitive through Flask-SQLAlchemy, pinned for reproducibility)
+SQLAlchemy==2.0.52
+
+# Alembic integration for version-controlled migrations
+Flask-Migrate==4.1.0
+
+# Migration engine (transitive through Flask-Migrate, pinned for reproducibility)
+alembic==1.19.1
+
+# PostgreSQL driver
+psycopg2-binary==2.9.12
+
+# Loads .env and .flaskenv
+python-dotenv==1.2.2
