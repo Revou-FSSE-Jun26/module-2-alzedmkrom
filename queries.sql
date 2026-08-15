@@ -110,3 +110,20 @@ UNION ALL
 SELECT 'orders', COUNT(*) FROM orders
 UNION ALL
 SELECT 'order_items', COUNT(*) FROM order_items;
+
+SELECT
+    oi.order_id,
+    p.id AS product_id,
+    p.name AS product_name,
+    oi.quantity,
+    oi.unit_price
+FROM order_items AS oi
+JOIN products AS p ON p.id = oi.product_id
+WHERE oi.order_id = 4
+ORDER BY p.id;
+
+SELECT order_id, COUNT(*) AS product_count
+FROM order_items
+GROUP BY order_id
+HAVING COUNT(*) > 1
+ORDER BY order_id;
