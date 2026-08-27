@@ -1,0 +1,48 @@
+# Python virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Python bytecode caches
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Python tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Flask instance folder
+instance/
+
+# Environment variables and local secrets
+.env
+.env.*
+!.env.example
+
+# Database exports and backups
+*.backup
+*.dump
+*.sql.bak
+
+# Logs and temporary files
+*.log
+*.tmp
+*.swp
+*~
+
+# DBeaver local workspace files
+.dbeaver/
+.metadata/
+
+# IDE settings
+.vscode/
+.idea/
+*.code-workspace
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini
