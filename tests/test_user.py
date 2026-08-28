@@ -130,14 +130,14 @@ def test_login_unknown_email_error(client):
 def test_get_user_happy_path(client):
     created = _register(client).get_json()
 
-    resp = client.get(f"/{created['id']}")
+    resp = client.get(f"/users/{created['id']}")
 
     assert resp.status_code == 200
     assert resp.get_json()["username"] == "alice"
 
 
 def test_get_user_not_found_error(client):
-    resp = client.get("/999")
+    resp = client.get("/users/999")
 
     assert resp.status_code == 404
     assert resp.get_json()["error"] == "Not Found"
