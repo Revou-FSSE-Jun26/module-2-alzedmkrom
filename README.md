@@ -1,6 +1,6 @@
 # RevoShop
 
-A Flask + SQLAlchemy application layer built on top of the existing, already-populated `revoshop_db` PostgreSQL database from Checkpoint 1. It exposes database-backed endpoints for products, categories, orders, and user registration/retrieval, a Flask-Migrate history that adds a `role` column to `users` and an `is_delete` soft-delete column to both `products` and `orders`, and `flask` CLI commands for connection verification, test-data cleanup, and many-to-many demonstration data.
+A Flask + SQLAlchemy application layer built on top of the existing, already-populated `revoshop_db` PostgreSQL database from Checkpoint 1. It exposes database-backed endpoints for products, categories, orders, and user registration/retrieval, a Flask-Migrate history that adds a `role` column to `users` and an `is_delete` soft-delete column to both `products` and `orders`, and `flask` CLI commands for connection verification and many-to-many demonstration data.
 
 Real session/token authentication and deployment are out of scope for this checkpoint (JWT is optional/exploratory only); everything runs locally.
 
@@ -21,8 +21,7 @@ RevoShop is the backend for a small online store. It manages a catalog of **prod
 - **Stock management** — placing an order decrements product stock (and rejects an order that exceeds available stock); cancelling/returning/refunding an order restores it.
 - **Soft delete for orders** — `DELETE /orders/<id>` sets `is_delete = true` instead of removing the row, so financial/order history is never destroyed.
 - **Automated tests** — a `pytest` suite (`tests/`) covers all Category CRUD endpoints plus users, products, and orders, on happy-path and error cases, against an isolated test database.
-- **Load testing** — a `locustfile.py` simulates a concurrent shopper journey (browse → view → order → view order).
-- **Environment-based configuration** — database URL, secret key, and debug flag are read from a `.env` file via `python-dotenv`, never hardcoded.
+- **Load testing** — a `locustfile.py` simulates a concurrent shopper journey (browse → view → order → view order) against a dedicated `revoshop_test` database.
 
 ## Technologies Used
 
@@ -45,7 +44,7 @@ RevoShop is the backend for a small online store. It manages a catalog of **prod
 - `models.py` — `User`, `Category`, `Product`, `Order`, and the `order_items` association table.
 - `routes.py` — `home_bp`, `products_bp`, `categories_bp`, `orders_bp`, and `users_bp`, all database-backed.
 - `errors.py` — JSON error handlers for 400/404/405/500.
-- `cli.py` — `flask check-db`, `flask reset-test-data`, and `flask link-order-products`.
+- `cli.py` — `flask check-db` and `flask link-order-products`.
 - `locustfile.py` — Locust load test simulating a shopper journey (list products, view one, place an order, view that order).
 - `app.py` — entry point; registers blueprints and runs the dev server.
 - `migrations/` — the Flask-Migrate environment and revision history.
@@ -194,7 +193,7 @@ After any `flask db upgrade`, run:
 flask check-db
 ```
 
-and confirm the row counts read 10 / 4 / 10 / 30 / 56 (a fresh Checkpoint 1 seed inserts 54 order_items; the two extra come from `flask link-order-products`, which extends order 4 for the many-to-many demonstration). The `users` count may read higher than 10 if `POST /users` has been exercised since seeding, and `orders`/`order_items` may read higher after local API or Locust testing; that is expected and does not indicate data loss, since the original seeded rows are still present. Run `flask reset-test-data` to return to the seeded baseline. Re-running `queries.sql` in a database client should still return no rows from its integrity checks.
+and confirm the row counts read 10 / 4 / 10 / 30 / 56 (a fresh Checkpoint 1 seed inserts 54 order_items; the two extra come from `flask link-order-products`, which extends order 4 for the many-to-many demonstration). The `users` count may read higher than 10 if `POST /users` has been exercised since seeding, and `orders`/`order_items` may read higher after local API or Locust testing; that is expected and does not indicate data loss, since the original seeded rows are still present. Re-running `queries.sql` in a database client should still return no rows from its integrity checks.
 
 ## Endpoints
 
@@ -872,7 +871,7 @@ Response — `401 Unauthorized`:
 
 ## CLI Commands
 
-All three commands run inside the app context that `flask` provides, using `FLASK_APP=app.py` from `.flaskenv`.
+Both commands run inside the app context that `flask` provides, using `FLASK_APP=app.py` from `.flaskenv`.
 
 ### `flask check-db`
 
@@ -903,28 +902,6 @@ Connection OK.
 ```
 
 If the connection fails, the command prints the masked target URI, the error type and message with the password scrubbed, a hint to confirm PostgreSQL is running and the database exists, and exits with a non-zero status.
-
-### `flask reset-test-data`
-
-Undoes the order and stock side-effects of local testing (the Locust journey in `locustfile.py`, Postman, or manual API calls) against whatever database `DATABASE_URL` points at. `POST /orders` commits real `orders`/`order_items` rows and deducts real `stock_quantity`; nothing about a normal HTTP request is aware it came from a test, so those changes persist — this command reverses them in one step, rather than by hand each time.
-
-Deletes every `order_items`/`orders` row above the seeded id range (30), then resets every one of the 10 seeded products' `stock_quantity` back to its exact `seed.sql` value and clears `is_delete` on all of them.
-
-It deliberately does **not** delete `users` or `products` rows, even those above the seeded id range. The Locust journey only ever creates orders, never users or products, so anything extra in those tables is a deliberate account or product you created (e.g. via Postman) and want to keep. `categories` is untouched for the same reason.
-
-```sh
-flask reset-test-data
-```
-
-Example output:
-
-```
-Deleted 1115 test order(s) and 1141 order_items row(s).
-Reset stock_quantity and is_delete on all 10 seeded products.
-Left users and products above the seeded range untouched.
-```
-
-Safe to run repeatedly: with nothing to clean up, it reports 0 deletions and re-applies the same stock values. Run this after any local Locust or Postman session against `revoshop_db`, before running `queries.sql`'s integrity checks or comparing row counts against the ones documented in this README. (Because it leaves test users/products in place, the `users` and `products` counts may read higher than the seeded 10; that is expected and does not indicate a failed reset.)
 
 ### `flask link-order-products`
 
@@ -958,6 +935,16 @@ The Statistics table groups `GET /products/<id>` and `GET /orders/<id>` under th
 
 The Flask server must already be running (`flask run` or `python app.py`) before starting Locust; `locustfile.py` sends real HTTP requests to it, it does not import or call the app in-process.
 
+**Use a dedicated test database** so Locust orders and stock changes never touch your main `revoshop_db` data. Point `DATABASE_URL` at `revoshop_test` before starting the server (see `.env.example` for one-time setup instructions):
+
+```powershell
+# PowerShell — override DATABASE_URL for this terminal session only
+$env:DATABASE_URL="postgresql://postgres:your_password@localhost/revoshop_test"
+flask run
+```
+
+Then in a second terminal, start Locust:
+
 ```sh
 locust -f locustfile.py --host=http://127.0.0.1:5000
 ```
@@ -971,17 +958,17 @@ locust -f locustfile.py --host=http://127.0.0.1:5000 \
     --users 200 --spawn-rate 10 --run-time 2m --headless
 ```
 
-### Cleanup after running
+### After a run
 
-**Every request this journey makes is a real HTTP call against whatever database `DATABASE_URL` points at.** `POST /orders` commits real `orders`/`order_items` rows and deducts real `stock_quantity` — nothing reverts automatically, the same as if those rows had been inserted by hand. A long enough or large enough run can deplete every product's stock to 0; `list_products` is written to fail cleanly with a clear message ("No active, in-stock products available") in that case, rather than sending `create_order` a product it would reject anyway.
+Because Locust hits `revoshop_test`, your main `revoshop_db` is completely unaffected. If you want a clean `revoshop_test` for the next run, truncate the orders and order_items tables and reset stock:
 
-After any run, reset the database back to its seeded state:
-
-```sh
-flask reset-test-data
+```sql
+-- in psql or pgAdmin, connected to revoshop_test
+TRUNCATE order_items, orders RESTART IDENTITY;
+UPDATE products SET stock_quantity = seed_value, is_delete = false;
 ```
 
-See the [`flask reset-test-data`](#flask-reset-test-data) entry under CLI Commands above for exactly what it deletes/resets, and confirm the cleanup with `flask check-db`.
+Or simply drop and re-create `revoshop_test` from scratch — it only has seed data (no real user orders), so nothing important is lost.
 
 ## Screenshots
 
