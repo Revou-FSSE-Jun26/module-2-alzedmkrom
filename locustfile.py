@@ -32,16 +32,10 @@ which point `list_products` below starts failing on purpose (see its
 "No active, in-stock products available" check) rather than silently
 placing bad orders.
 
-After a run, reset the database back to its seeded state with:
-
-    flask reset-test-data
-
-That command (see cli.py) deletes every order/order_items row created above
-the seeded id range and resets every seeded product's stock_quantity and
-is_delete back to its exact seed.sql value. It leaves users and products
-alone (this journey never creates either), so any account you made in
-Postman survives. It is safe to run more than once. See the "CLI Commands"
-section of README.md for full details and example output.
+Run against `revoshop_test` (the dedicated load-test database) rather than
+`revoshop_db`, and orders/stock changes from Locust stay isolated there
+without affecting your real data. See `.env.example` for how to set
+`DATABASE_URL` to point at `revoshop_test` before starting `flask run`.
 """
 
 import random
