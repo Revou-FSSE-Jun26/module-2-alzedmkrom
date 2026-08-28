@@ -58,3 +58,10 @@ CREATE TABLE order_items (
 CREATE INDEX idx_products_category_id ON products (category_id);
 CREATE INDEX idx_orders_user_id ON orders (user_id);
 CREATE INDEX idx_order_items_product_id ON order_items (product_id);
+
+SELECT setval('users_id_seq', 20, true);
+SELECT setval('categories_id_seq', 4, true);
+SELECT setval('products_id_seq', 10, true);
+SELECT setval('orders_id_seq', 30, true);
+SELECT setval('order_items_id_seq', 20, true);
+
