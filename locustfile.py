@@ -19,11 +19,33 @@ to 200, spawn rate a few per second), or run headless:
 Uses an existing seeded user (id 1) rather than registering a new one per
 simulated user, so the journey stays focused on products/orders and does
 not create a new user row on every single iteration.
+
+IMPORTANT — cleanup after running this:
+
+`create_order` commits real rows against whatever database `DATABASE_URL`
+points at (your real local `revoshop_db` if you're running this the normal
+way) and deducts real `stock_quantity`. Nothing about this file, or a
+normal HTTP request in general, reverts those writes automatically — they
+are permanent commits, same as if you'd typed the inserts by hand. A run
+with enough users/duration can deplete every product's stock to 0, at
+which point `list_products` below starts failing on purpose (see its
+"No active, in-stock products available" check) rather than silently
+placing bad orders.
+
+After a run, reset the database back to its seeded state with:
+
+    flask reset-test-data
+
+That command (see cli.py) deletes every order/order_items/user/product row
+created above the seeded id range, and resets every seeded product's
+stock_quantity and is_delete back to its exact seed.sql value. It is safe
+to run more than once. See the "CLI Commands" section of README.md for
+full details and example output.
 """
 
 import random
 
-from locust import HttpUser, LoadTestShape, SequentialTaskSet, between, task
+from locust import HttpUser, SequentialTaskSet, between, task
 
 # A real, already-seeded user id (see seed.sql). Every simulated user places
 # orders "as" this account; there is no session/token auth in this project
@@ -52,11 +74,21 @@ class ProductAndOrderJourney(SequentialTaskSet):
                 resp.failure("GET /products returned an empty list")
                 return
 
-            # A random in-stock product, so repeated runs don't hammer the
-            # same row's stock_quantity down to zero.
-            in_stock = [p for p in products if p.get("stock_quantity", 0) > 0]
-            chosen = random.choice(in_stock or products)
-            self.product_id = chosen["id"]
+            # A random in-stock, non-soft-deleted product, so repeated runs
+            # don't hammer the same row's stock_quantity down to zero and
+            # never pick a product that create_order would reject. GET
+            # /products already excludes is_delete=True rows by default
+            # (no ?include_deleted=true here), but this filter is kept as a
+            # defense-in-depth check in case that default ever changes.
+            candidates = [
+                p for p in products
+                if p.get("stock_quantity", 0) > 0 and not p.get("is_delete", False)
+            ]
+            if not candidates:
+                resp.failure("No active, in-stock products available")
+                return
+
+            self.product_id = random.choice(candidates)["id"]
 
     @task
     def get_single_product(self):
@@ -64,7 +96,9 @@ class ProductAndOrderJourney(SequentialTaskSet):
         if self.product_id is None:
             return
 
-        with self.client.get(f"/products/{self.product_id}", catch_response=True) as resp:
+        with self.client.get(
+            f"/products/{self.product_id}", name="/products/[id]", catch_response=True
+        ) as resp:
             if resp.status_code != 200:
                 resp.failure(f"GET /products/{self.product_id} returned {resp.status_code}")
 
@@ -97,7 +131,9 @@ class ProductAndOrderJourney(SequentialTaskSet):
         if self.order_id is None:
             return
 
-        with self.client.get(f"/orders/{self.order_id}", catch_response=True) as resp:
+        with self.client.get(
+            f"/orders/{self.order_id}", name="/orders/[id]", catch_response=True
+        ) as resp:
             if resp.status_code != 200:
                 resp.failure(f"GET /orders/{self.order_id} returned {resp.status_code}")
 
@@ -114,27 +150,3 @@ class RevoShopUser(HttpUser):
 
     # Think time between journeys, so 200 users don't fire in lockstep.
     wait_time = between(1, 3)
-
-
-class StepLoadShape(LoadTestShape):
-    """Ramps user count in stages: 50 -> 100 -> 150 -> 200, gradually.
-
-    Only takes effect if this file is run without an explicit --users/
-    --spawn-rate on the command line; those flags are ignored once a
-    LoadTestShape is defined, since the shape takes over user-count control.
-    Each stage holds for `stage_duration` seconds before stepping up, at a
-    spawn rate of 10 users/second.
-    """
-
-    stage_duration = 60  # seconds per stage
-    stages = [50, 100, 150, 200]
-    spawn_rate = 10
-
-    def tick(self):
-        run_time = self.get_run_time()
-        stage_index = int(run_time // self.stage_duration)
-
-        if stage_index >= len(self.stages):
-            return None  # stop the test once the last stage's duration ends
-
-        return (self.stages[stage_index], self.spawn_rate)
