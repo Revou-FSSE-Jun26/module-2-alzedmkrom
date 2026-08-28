@@ -13,12 +13,10 @@ from sqlalchemy.exc import SQLAlchemyError
 from extensions import app, db
 from models import Category, Order, Product, User, order_items
 
-# The last row id belonging to seed.sql for each table. Anything with a
-# higher id was created afterward (registration, Postman, Locust, etc.) and
-# is safe for `flask reset-test-data` to remove. See seed.sql: 10 users,
-# 10 products, 30 orders.
-SEEDED_MAX_USER_ID = 10
-SEEDED_MAX_PRODUCT_ID = 10
+# The last orders row id belonging to seed.sql (see seed.sql: 30 orders).
+# Any order above this id was created afterward by testing (Locust, Postman,
+# manual), so `flask reset-test-data` removes it. Users and products are
+# deliberately left alone, so their seeded-max ids are not needed here.
 SEEDED_MAX_ORDER_ID = 30
 
 # products.stock_quantity exactly as inserted by seed.sql, keyed by product
@@ -114,33 +112,34 @@ def check_db():
 
 @app.cli.command("reset-test-data")
 def reset_test_data():
-    """Undo the write side-effects of local load/manual testing.
+    """Undo the order/stock side-effects of local load/manual testing.
 
     `create_order` (POST /orders) commits real rows against whatever
     database `DATABASE_URL` points at and deducts real `stock_quantity`;
     running the Locust journey, exercising Postman, or manual testing
     against a local `revoshop_db` all leave those rows and deductions
     behind, since nothing about a normal HTTP request is aware it came
-    from a load test. This command reverses that:
+    from a load test. This command reverses exactly that, and nothing more:
 
       1. Deletes every `order_items` row whose `order_id` is above the
          seeded range (`SEEDED_MAX_ORDER_ID`).
       2. Deletes every `orders` row above that same id.
-      3. Deletes every `users` row above `SEEDED_MAX_USER_ID` (e.g. from
-         repeatedly hitting `POST /users` during testing).
-      4. Deletes every `products` row above `SEEDED_MAX_PRODUCT_ID` (e.g.
-         a product created via Postman/pytest exploration that was never
-         cleaned up).
-      5. Resets every seeded product's `stock_quantity` back to its exact
+      3. Resets every seeded product's `stock_quantity` back to its exact
          `seed.sql` value (`SEEDED_PRODUCT_STOCK`) and clears `is_delete`
-         on all of them, undoing any soft-delete from `DELETE
-         /products/<id>`.
+         on all of them, undoing any deduction from `create_order`, any
+         restore from `update_order_status`, and any soft-delete from
+         `DELETE /products/<id>`.
 
-    Does not touch `categories`, since nothing in this project deletes or
-    creates categories as a side effect of order/product testing.
+    Deliberately does NOT delete `users` or `products` rows, even those
+    above the seeded id range. The Locust journey only ever creates orders,
+    never users or products, so anything above the seeded range in those
+    two tables is a deliberate account or product you created (e.g. via
+    Postman) and want to keep. `categories` is untouched for the same
+    reason.
 
-    Safe to run repeatedly: if there is nothing above the seeded range,
-    steps 1-4 delete zero rows, and step 5 just re-applies the same values.
+    Safe to run repeatedly: if there is nothing above the seeded order
+    range, steps 1-2 delete zero rows, and step 3 just re-applies the same
+    values.
     """
     try:
         deleted_items = db.session.execute(
@@ -150,14 +149,6 @@ def reset_test_data():
         deleted_orders = db.session.execute(
             text("DELETE FROM orders WHERE id > :max_id"),
             {"max_id": SEEDED_MAX_ORDER_ID},
-        ).rowcount
-        deleted_users = db.session.execute(
-            text("DELETE FROM users WHERE id > :max_id"),
-            {"max_id": SEEDED_MAX_USER_ID},
-        ).rowcount
-        deleted_products = db.session.execute(
-            text("DELETE FROM products WHERE id > :max_id"),
-            {"max_id": SEEDED_MAX_PRODUCT_ID},
         ).rowcount
 
         for product_id, stock_quantity in SEEDED_PRODUCT_STOCK.items():
@@ -177,8 +168,8 @@ def reset_test_data():
         raise SystemExit(1)
 
     click.echo(f"Deleted {deleted_orders} test order(s) and {deleted_items} order_items row(s).")
-    click.echo(f"Deleted {deleted_users} test user(s) and {deleted_products} test product(s).")
     click.echo(f"Reset stock_quantity and is_delete on all {len(SEEDED_PRODUCT_STOCK)} seeded products.")
+    click.echo("Left users and products above the seeded range untouched.")
 
 
 @app.cli.command("link-order-products")
