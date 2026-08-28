@@ -282,7 +282,7 @@ def login():
 
     return jsonify(user.to_dict())
 
-@users_bp.route("/<int:user_id>", methods=["GET"])
+@users_bp.route("/users/<int:user_id>", methods=["GET"])
 def get_user(user_id):
     """Return the user matching `user_id`, or a 404 JSON error naming the id."""
     user = db.session.get(User, user_id)
