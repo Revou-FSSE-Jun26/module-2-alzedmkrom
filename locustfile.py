@@ -36,11 +36,12 @@ After a run, reset the database back to its seeded state with:
 
     flask reset-test-data
 
-That command (see cli.py) deletes every order/order_items/user/product row
-created above the seeded id range, and resets every seeded product's
-stock_quantity and is_delete back to its exact seed.sql value. It is safe
-to run more than once. See the "CLI Commands" section of README.md for
-full details and example output.
+That command (see cli.py) deletes every order/order_items row created above
+the seeded id range and resets every seeded product's stock_quantity and
+is_delete back to its exact seed.sql value. It leaves users and products
+alone (this journey never creates either), so any account you made in
+Postman survives. It is safe to run more than once. See the "CLI Commands"
+section of README.md for full details and example output.
 """
 
 import random
