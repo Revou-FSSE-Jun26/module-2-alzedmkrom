@@ -13,6 +13,31 @@ from sqlalchemy.exc import SQLAlchemyError
 from extensions import app, db
 from models import Category, Order, Product, User, order_items
 
+# The last row id belonging to seed.sql for each table. Anything with a
+# higher id was created afterward (registration, Postman, Locust, etc.) and
+# is safe for `flask reset-test-data` to remove. See seed.sql: 10 users,
+# 10 products, 30 orders.
+SEEDED_MAX_USER_ID = 10
+SEEDED_MAX_PRODUCT_ID = 10
+SEEDED_MAX_ORDER_ID = 30
+
+# products.stock_quantity exactly as inserted by seed.sql, keyed by product
+# id. `flask reset-test-data` restores every product to these values,
+# undoing whatever `create_order`/`update_order_status` deducted or
+# restored during testing.
+SEEDED_PRODUCT_STOCK = {
+    1: 50,
+    2: 200,
+    3: 80,
+    4: 150,
+    5: 30,
+    6: 300,
+    7: 60,
+    8: 100,
+    9: 45,
+    10: 75,
+}
+
 # Order 4 (Windbreaker Jacket, qty 1) is extended rather than replaced, so the
 # `queries.sql` check expecting exactly three orders per user keeps passing.
 # Products 1 and 2 aren't yet linked to order 4 (seed.sql order_items has only
@@ -85,6 +110,75 @@ def check_db():
 
     click.echo("")
     click.secho("Connection OK.", fg="green")
+
+
+@app.cli.command("reset-test-data")
+def reset_test_data():
+    """Undo the write side-effects of local load/manual testing.
+
+    `create_order` (POST /orders) commits real rows against whatever
+    database `DATABASE_URL` points at and deducts real `stock_quantity`;
+    running the Locust journey, exercising Postman, or manual testing
+    against a local `revoshop_db` all leave those rows and deductions
+    behind, since nothing about a normal HTTP request is aware it came
+    from a load test. This command reverses that:
+
+      1. Deletes every `order_items` row whose `order_id` is above the
+         seeded range (`SEEDED_MAX_ORDER_ID`).
+      2. Deletes every `orders` row above that same id.
+      3. Deletes every `users` row above `SEEDED_MAX_USER_ID` (e.g. from
+         repeatedly hitting `POST /users` during testing).
+      4. Deletes every `products` row above `SEEDED_MAX_PRODUCT_ID` (e.g.
+         a product created via Postman/pytest exploration that was never
+         cleaned up).
+      5. Resets every seeded product's `stock_quantity` back to its exact
+         `seed.sql` value (`SEEDED_PRODUCT_STOCK`) and clears `is_delete`
+         on all of them, undoing any soft-delete from `DELETE
+         /products/<id>`.
+
+    Does not touch `categories`, since nothing in this project deletes or
+    creates categories as a side effect of order/product testing.
+
+    Safe to run repeatedly: if there is nothing above the seeded range,
+    steps 1-4 delete zero rows, and step 5 just re-applies the same values.
+    """
+    try:
+        deleted_items = db.session.execute(
+            text("DELETE FROM order_items WHERE order_id > :max_id"),
+            {"max_id": SEEDED_MAX_ORDER_ID},
+        ).rowcount
+        deleted_orders = db.session.execute(
+            text("DELETE FROM orders WHERE id > :max_id"),
+            {"max_id": SEEDED_MAX_ORDER_ID},
+        ).rowcount
+        deleted_users = db.session.execute(
+            text("DELETE FROM users WHERE id > :max_id"),
+            {"max_id": SEEDED_MAX_USER_ID},
+        ).rowcount
+        deleted_products = db.session.execute(
+            text("DELETE FROM products WHERE id > :max_id"),
+            {"max_id": SEEDED_MAX_PRODUCT_ID},
+        ).rowcount
+
+        for product_id, stock_quantity in SEEDED_PRODUCT_STOCK.items():
+            db.session.execute(
+                text(
+                    "UPDATE products SET stock_quantity = :qty, is_delete = false "
+                    "WHERE id = :pid"
+                ),
+                {"qty": stock_quantity, "pid": product_id},
+            )
+
+        db.session.commit()
+    except SQLAlchemyError as exc:
+        db.session.rollback()
+        click.secho("Resetting test data failed.", fg="red", err=True)
+        click.secho(f"  {type(exc).__name__}: {exc}", err=True)
+        raise SystemExit(1)
+
+    click.echo(f"Deleted {deleted_orders} test order(s) and {deleted_items} order_items row(s).")
+    click.echo(f"Deleted {deleted_users} test user(s) and {deleted_products} test product(s).")
+    click.echo(f"Reset stock_quantity and is_delete on all {len(SEEDED_PRODUCT_STOCK)} seeded products.")
 
 
 @app.cli.command("link-order-products")
