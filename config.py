@@ -22,6 +22,14 @@ class Config:
 
     SQLALCHEMY_DATABASE_URI = os.environ["DATABASE_URL"]
 
+    # Separate connection string used only by database migrations (Alembic /
+    # `flask db *`). Supabase's transaction-mode pooler (port 6543) that
+    # `DATABASE_URL` points at cannot run migration DDL transactions, so
+    # migrations must go through the session-mode pooler (port 5432) named
+    # here. Falls back to DATABASE_URL when unset, so a plain local Postgres
+    # setup with only DATABASE_URL still works. See migrations/env.py.
+    DIRECT_URL = os.environ.get("DIRECT_URL", os.environ["DATABASE_URL"])
+
     # Turn off Flask-SQLAlchemy's event tracking to avoid its overhead warning.
     SQLALCHEMY_TRACK_MODIFICATIONS = False
 
