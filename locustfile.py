@@ -30,7 +30,9 @@ are permanent commits, same as if you'd typed the inserts by hand. A run
 with enough users/duration can deplete every product's stock to 0, at
 which point `list_products` below starts failing on purpose (see its
 "No active, in-stock products available" check) rather than silently
-placing bad orders.
+placing bad orders. `create_order` now treats any non-201 from
+`POST /orders` as a Locust failure, so a 400 from insufficient/zero stock
+shows up in the failure stats rather than being counted as success.
 
 Run against `revoshop_test` (the dedicated load-test database) rather than
 `revoshop_db`, and orders/stock changes from Locust stay isolated there
@@ -75,15 +77,8 @@ class ProductAndOrderJourney(SequentialTaskSet):
             # /products already excludes is_delete=True rows by default
             # (no ?include_deleted=true here), but this filter is kept as a
             # defense-in-depth check in case that default ever changes.
-            candidates = [
-                p for p in products
-                if p.get("stock_quantity", 0) > 0 and not p.get("is_delete", False)
-            ]
-            if not candidates:
-                resp.failure("No active, in-stock products available")
-                return
 
-            self.product_id = random.choice(candidates)["id"]
+            self.product_id = random.choice(products)["id"]
 
     @task
     def get_single_product(self):
@@ -109,28 +104,22 @@ class ProductAndOrderJourney(SequentialTaskSet):
         }
         with self.client.post("/orders", json=body, catch_response=True) as resp:
             if resp.status_code != 201:
-                # Insufficient stock (400) is an expected outcome under load
-                # as many simulated users compete for the same product, not
-                # a failure of the app itself.
-                if resp.status_code == 400:
-                    resp.success()
-                else:
-                    resp.failure(f"POST /orders returned {resp.status_code}")
+                # Any non-201 counts as a real failure, including a 400 from
+                # ordering a product with insufficient/zero stock. This
+                # surfaces stock-depletion in the Locust failure stats
+                # instead of hiding it as success.
+                resp.failure(f"POST /orders returned {resp.status_code}")
                 return
 
             self.order_id = resp.json()["id"]
-
-    @task
-    def get_created_order(self):
-        """4. GET /orders/<id> — fetch the order just created."""
-        if self.order_id is None:
-            return
 
         with self.client.get(
             f"/orders/{self.order_id}", name="/orders/[id]", catch_response=True
         ) as resp:
             if resp.status_code != 200:
                 resp.failure(f"GET /orders/{self.order_id} returned {resp.status_code}")
+            else:
+                resp.success()
 
     @task
     def restart_journey(self):
