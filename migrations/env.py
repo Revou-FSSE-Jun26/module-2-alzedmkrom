@@ -25,6 +25,12 @@ def get_engine():
 
 
 def get_engine_url():
+    # Migrations must run over the session-mode connection (DIRECT_URL), not
+    # the app's transaction-mode pooler URL. Config.DIRECT_URL falls back to
+    # DATABASE_URL when unset, so local single-URL setups are unaffected.
+    direct_url = current_app.config.get("DIRECT_URL")
+    if direct_url:
+        return direct_url.replace('%', '%%')
     try:
         return get_engine().url.render_as_string(hide_password=False).replace(
             '%', '%%')
@@ -94,7 +100,15 @@ def run_migrations_online():
     if conf_args.get("process_revision_directives") is None:
         conf_args["process_revision_directives"] = process_revision_directives
 
-    connectable = get_engine()
+    # Build the migration engine from the resolved sqlalchemy.url (DIRECT_URL,
+    # the session-mode pooler) rather than reusing the app's transaction-mode
+    # pooler engine, which cannot run migration DDL transactions.
+    from sqlalchemy import engine_from_config
+
+    connectable = engine_from_config(
+        {"sqlalchemy.url": config.get_main_option("sqlalchemy.url")},
+        prefix="sqlalchemy.",
+    )
 
     with connectable.connect() as connection:
         context.configure(
