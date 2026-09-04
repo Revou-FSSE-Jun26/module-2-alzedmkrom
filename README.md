@@ -2,7 +2,21 @@
 
 A Flask + SQLAlchemy application layer built on top of the existing, already-populated `revoshop_db` PostgreSQL database from Checkpoint 1. It exposes database-backed endpoints for products, categories, orders, and user registration/retrieval, a Flask-Migrate history that adds a `role` column to `users` and an `is_delete` soft-delete column to both `products` and `orders`, and `flask` CLI commands for connection verification and many-to-many demonstration data.
 
-Real session/token authentication and deployment are out of scope for this checkpoint (JWT is optional/exploratory only); everything runs locally.
+Real session/token authentication is out of scope for this checkpoint (JWT is optional/exploratory only). The API is deployed on Railway with its database hosted on Supabase (see Live Demo below), and also runs locally.
+
+## Live Demo
+
+The API is live on Railway, backed by a Supabase PostgreSQL database:
+
+- **Base URL:** https://web-production-03650.up.railway.app
+- **Health check:** [`GET /`](https://web-production-03650.up.railway.app/) → `{"message": "RevoShop API is running."}`
+- **Example:** [`GET /products`](https://web-production-03650.up.railway.app/products) → JSON list of products
+
+Example request:
+
+```bash
+curl https://web-production-03650.up.railway.app/products
+```
 
 ## Overview
 
