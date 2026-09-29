@@ -6,6 +6,7 @@ The only project import allowed here is ``Config`` from ``config``.
 """
 
 from flask import Flask
+from flask_cors import CORS
 from flask_migrate import Migrate
 from flask_sqlalchemy import SQLAlchemy
 
@@ -18,3 +19,14 @@ app.config.from_object(Config)
 # Direct bound form: the extensions are attached to the app on creation.
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
+
+# Cross-origin access for browser frontends. Scoped to the origins in
+# `Config.CORS_ORIGINS` (an explicit allowlist, not "*") and applied to every
+# route, since every route in this project is an API endpoint. `supports_
+# credentials` stays off: there is no cookie-based session to send, and it is
+# incompatible with a wildcard origin should the allowlist ever be widened.
+cors = CORS(
+    app,
+    resources={r"/*": {"origins": app.config["CORS_ORIGINS"]}},
+    supports_credentials=False,
+)

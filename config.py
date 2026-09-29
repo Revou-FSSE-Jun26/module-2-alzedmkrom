@@ -38,3 +38,26 @@ class Config:
     # Parsed from the string env vars always are; anything other than a
     # literal "true" (case-insensitive) is treated as False.
     DEBUG = os.environ.get("FLASK_DEBUG", "false").strip().lower() == "true"
+
+    # Browser origins allowed to call this API cross-origin (see extensions.py).
+    # Without these headers a browser blocks every request from a frontend on a
+    # different origin, even though the API itself answers correctly — curl and
+    # Postman are unaffected, which is why this is easy to miss.
+    #
+    # Comma-separated. The default covers the usual local frontend dev servers
+    # (Create React App / Next.js on 3000, Vite on 5173). Set `CORS_ORIGINS` in
+    # the environment to the deployed frontend's origin in production, e.g.
+    #   CORS_ORIGINS=https://my-shop.vercel.app,http://localhost:5173
+    #
+    # An explicit allowlist is used rather than "*" because this API has no
+    # authentication yet: any origin permitted here can place orders and create
+    # users. Widen it deliberately, not by default.
+    CORS_ORIGINS = [
+        origin.strip()
+        for origin in os.environ.get(
+            "CORS_ORIGINS",
+            "http://localhost:3000,http://127.0.0.1:3000,"
+            "http://localhost:5173,http://127.0.0.1:5173",
+        ).split(",")
+        if origin.strip()
+    ]
