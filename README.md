@@ -70,6 +70,9 @@ RevoShop is the backend for a small online store. It manages a catalog of **prod
 - `locustfile.py` — Locust load test simulating a shopper journey (list products, view one, place an order, view that order).
 - `app.py` — entry point; registers blueprints and runs the dev server.
 - `migrations/` — the Flask-Migrate environment and revision history.
+- `requirements.txt` — runtime dependencies, pinned. This is what the deployment host installs.
+- `requirements-dev.txt` — `pytest` and `locust`, kept separate so they are not installed into the deployed image.
+- `Procfile` — the process command the host runs: `gunicorn app:app --bind 0.0.0.0:$PORT`.
 
 ## Setup
 
@@ -91,11 +94,22 @@ source .venv/bin/activate
 
 ### 2. Install dependencies
 
+Dependencies are split across two files, because the deployment host installs the runtime one on every build and neither the test runner nor the load-test tool is needed to serve a request:
+
+- **`requirements.txt`** — what the app needs to run: Flask, Flask-SQLAlchemy, Flask-Migrate, Flask-JWT-Extended, Flask-Cors, SQLAlchemy, alembic, `psycopg2-binary`, `python-dotenv`, and `gunicorn`, plus their pinned transitive dependencies.
+- **`requirements-dev.txt`** — `pytest` and `locust`, for the test suite and load testing.
+
+To work on the project, install both:
+
+```sh
+pip install -r requirements.txt -r requirements-dev.txt
+```
+
+To run it (or deploy it), the runtime file alone is enough:
+
 ```sh
 pip install -r requirements.txt
 ```
-
-This installs Flask, Flask-SQLAlchemy, Flask-Migrate, SQLAlchemy, alembic, `psycopg2-binary`, and `python-dotenv` at the versions pinned in `requirements.txt`.
 
 ### 3. Configure the connection
 

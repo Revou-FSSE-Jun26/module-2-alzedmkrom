@@ -1,0 +1,20 @@
+# Development and testing dependencies.
+#
+# Install on top of the runtime ones:
+#   pip install -r requirements.txt -r requirements-dev.txt
+#
+# Kept out of requirements.txt on purpose: the deployment host installs that
+# file on every build, and neither the test runner nor the load-test tool is
+# needed to serve a request. Locust in particular pulls in a web server, a
+# websocket stack, and gevent, none of which belong in a production image.
+
+# Test suite (`python -m pytest`).
+pytest==9.1.1
+iniconfig==2.3.0
+pluggy==1.6.0
+Pygments==2.21.0
+
+# Load testing (`locust -f locustfile.py --host=...`).
+# Not version-pinned as tightly as the runtime deps, since a load-test tool
+# drifting a minor version cannot affect what the deployed app does.
+locust>=2.46,<3
