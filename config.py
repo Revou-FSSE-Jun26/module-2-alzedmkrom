@@ -68,9 +68,10 @@ class Config:
     # the environment to the deployed frontend's origin in production, e.g.
     #   CORS_ORIGINS=https://my-shop.vercel.app,http://localhost:5173
     #
-    # An explicit allowlist is used rather than "*" because this API has no
-    # authentication yet: any origin permitted here can place orders and create
-    # users. Widen it deliberately, not by default.
+    # An explicit allowlist is used rather than "*" because a permitted origin
+    # can drive every endpoint the visitor's own token allows, and because "*"
+    # is incompatible with ever enabling credentialed requests. Widen it
+    # deliberately, not by default.
     CORS_ORIGINS = [
         origin.strip()
         for origin in os.environ.get(
