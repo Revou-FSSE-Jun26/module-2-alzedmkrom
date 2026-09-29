@@ -9,9 +9,24 @@ import math
 from decimal import Decimal
 
 from flask import Blueprint, current_app, jsonify, request
+from flask_jwt_extended import (
+    create_access_token,
+    create_refresh_token,
+    current_user,
+    decode_token,
+    get_jwt,
+    jwt_required,
+)
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 
+from auth import (
+    admin_required,
+    forbid_unless_self_or_admin,
+    is_admin,
+    revoke_current_token,
+    revoke_token,
+)
 from extensions import db
 from models import Category, Order, Product, User, order_items
 
@@ -47,6 +62,7 @@ def index():
 # ---------------------------------------------------------------------------
 
 @users_bp.route("/users", methods=["POST"])
+@jwt_required(optional=True)
 def register_user():
     """Create a new user account.
 
@@ -59,9 +75,8 @@ def register_user():
          naming `email`.
       4. Require a non-empty `password`; a missing or blank value returns
          400 naming `password`.
-      5. `role` is optional. If present it must be a string of 50
-         characters or fewer; a blank or omitted value falls back to the
-         model's `'CUSTOMER'` server default.
+      5. `role` is **only honored for an authenticated admin caller**. See
+         the note below.
       6. Case-insensitive duplicate pre-check on `username`/`email`; a match
          returns 409 naming whichever field actually conflicts.
       7. Build the `User`, hash the password, `add()` + `commit()`, return
@@ -69,10 +84,14 @@ def register_user():
       8. Any write failure rolls back: `IntegrityError` -> 409, any other
          `SQLAlchemyError` -> 500.
 
-    Note: this route has no authentication, so a caller can currently set
-    its own `role` on registration. That's fine for this checkpoint (role-
-    based authorization enforcement is out of scope), but it's worth
-    revisiting before this ever sits behind real auth.
+    Registration stays open to anonymous callers — a storefront has to let
+    people sign up — but `role` no longer is. Now that `role` decides who may
+    edit the catalog (see `admin_required`), honoring a caller-supplied
+    `role` here would let anyone mint themselves an admin account with a
+    single unauthenticated POST. So the token is inspected optionally: an
+    admin may set `role` (useful for creating the first colleague account),
+    and everyone else silently gets the model's `'CUSTOMER'` default, even if
+    they sent something else.
     """
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
@@ -166,6 +185,13 @@ def register_user():
             400,
         )
 
+    # Privilege escalation guard: drop a caller-supplied role unless the
+    # request carries an admin token. Silently ignored rather than rejected,
+    # so an ordinary signup that happens to include `role` still succeeds
+    # (as a CUSTOMER) instead of failing with a confusing 403.
+    if role and not is_admin(current_user):
+        role = ""
+
     username = username.strip()
     email = email.strip()
 
@@ -228,15 +254,54 @@ def register_user():
 
     return jsonify(user.to_dict()), 201
 
+def _issue_tokens(user):
+    """Mint a fresh access/refresh pair for `user` and describe their lifetimes.
+
+    `expires_in` / `refresh_expires_in` are seconds, included so a frontend can
+    schedule a refresh slightly before the access token lapses instead of
+    waiting to be surprised by a 401. `role` is copied into the access token as
+    a claim for convenience, but authorization never trusts it: every guard
+    re-reads the user from the database (see `auth._user_lookup`), so demoting
+    or deactivating an account takes effect on the account's next request
+    rather than whenever its current token happens to expire.
+    """
+    access_token = create_access_token(
+        identity=user, additional_claims={"role": user.role}
+    )
+    refresh_token = create_refresh_token(identity=user)
+    return {
+        "access_token": access_token,
+        "refresh_token": refresh_token,
+        "token_type": "Bearer",
+        "expires_in": int(
+            current_app.config["JWT_ACCESS_TOKEN_EXPIRES"].total_seconds()
+        ),
+        "refresh_expires_in": int(
+            current_app.config["JWT_REFRESH_TOKEN_EXPIRES"].total_seconds()
+        ),
+        "user": user.to_dict(),
+    }
+
+
 @users_bp.route("/auth/login", methods=["POST"])
 def login():
-    """Authenticate a user with email and password.
+    """Exchange email and password for an access/refresh token pair.
 
-    This is a placeholder implementation that mimics the behavior described
-    in the design document (Requirement 6) without actually implementing
-    authentication or tokens. It returns a 200 OK with the user's data,
-    which is sufficient for the frontend to "log in" and display the user's
-    info. A real implementation would generate a token and return it.
+    Response body:
+      {
+        "access_token": "...",        # send as: Authorization: Bearer <token>
+        "refresh_token": "...",       # only usable at POST /auth/refresh
+        "token_type": "Bearer",
+        "expires_in": 900,            # access token lifetime, seconds
+        "refresh_expires_in": 604800, # refresh token lifetime, seconds
+        "user": { ... }
+      }
+
+    A wrong email and a wrong password return the same 401 with the same
+    message, so the response cannot be used to enumerate which accounts
+    exist. A deactivated account (`is_active = false`) is refused here too,
+    with a distinct message, since that is a state the account holder can
+    act on rather than a credential mistake.
     """
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
@@ -250,9 +315,20 @@ def login():
             400,
         )
 
-    email = body.get("email", "").strip()
-    password = body.get("password", "")
+    email = body.get("email")
+    password = body.get("password")
+    if not isinstance(email, str) or not isinstance(password, str):
+        return (
+            jsonify(
+                {
+                    "error": "Bad Request",
+                    "message": "Email and password are required.",
+                }
+            ),
+            400,
+        )
 
+    email = email.strip()
     if not email or not password:
         return (
             jsonify(
@@ -275,16 +351,162 @@ def login():
                 {
                     "error": "Unauthorized",
                     "message": "Invalid email or password.",
+                    "code": "invalid_credentials",
                 }
             ),
             401,
         )
 
-    return jsonify(user.to_dict())
+    if not user.is_active:
+        return (
+            jsonify(
+                {
+                    "error": "Unauthorized",
+                    "message": "This account has been deactivated.",
+                    "code": "account_inactive",
+                }
+            ),
+            401,
+        )
+
+    return jsonify(_issue_tokens(user)), 200
+
+
+@users_bp.route("/auth/refresh", methods=["POST"])
+@jwt_required(refresh=True)
+def refresh():
+    """Trade a valid refresh token for a new access/refresh pair.
+
+    Called with the **refresh** token in the Authorization header, not the
+    access token.
+
+    The refresh token presented is revoked as part of issuing the new pair
+    (refresh-token rotation). Two things follow from that:
+
+    * Each token is single-use, so one captured from storage or a log is
+      worthless the moment the real client refreshes again — and a replay of
+      an already-rotated token comes back as `token_revoked`.
+    * The session's idle timeout slides. An active client keeps trading its
+      way forward indefinitely, while a client that goes quiet for longer
+      than `JWT_REFRESH_MINUTES` finds its refresh token expired and has to
+      log in again. That expiry is the auto-logout: this endpoint answers
+      401 `token_expired` with `"token_type": "refresh"`, which is a
+      frontend's cue to clear both tokens and show the login screen.
+    """
+    revoke_current_token()
+
+    payload = _issue_tokens(current_user)
+
+    try:
+        db.session.commit()
+    except SQLAlchemyError as exc:
+        db.session.rollback()
+        current_app.logger.exception("Failed to rotate refresh token: %s", exc)
+        return (
+            jsonify(
+                {
+                    "error": "Internal Server Error",
+                    "message": "An internal error occurred. Please try again later.",
+                }
+            ),
+            500,
+        )
+
+    return jsonify(payload), 200
+
+
+@users_bp.route("/auth/logout", methods=["POST"])
+@jwt_required()
+def logout():
+    """Revoke the caller's tokens, ending the session immediately.
+
+    Called with the **access** token in the Authorization header. Because a
+    JWT stays valid until its own expiry, "logging out" client-side by
+    forgetting the tokens would leave them usable by anyone who had copied
+    them; both are therefore recorded in `token_blocklist` and rejected from
+    here on.
+
+    The access token is always revoked. The refresh token is only revoked if
+    the client also sends it in the body:
+
+        {"refresh_token": "<the refresh token>"}
+
+    Clients should send it — skipping it leaves a working refresh token that
+    can mint new access tokens, so the session would not really be over. A
+    malformed or already-expired value there is ignored rather than rejected:
+    the point of logout is that the caller ends up logged out, so it answers
+    200 as long as the access token was revoked.
+    """
+    revoked = {"access": revoke_current_token(), "refresh": False}
+
+    body = request.get_json(silent=True)
+    if isinstance(body, dict) and isinstance(body.get("refresh_token"), str):
+        try:
+            decoded = decode_token(body["refresh_token"])
+        except Exception:  # noqa: BLE001 - any bad token is simply skipped
+            decoded = None
+        # Only the caller's own refresh token may be revoked here, so a
+        # captured token belonging to somebody else cannot be used to log
+        # that person out.
+        if (
+            decoded is not None
+            and decoded.get("type") == "refresh"
+            and str(decoded.get("sub")) == str(current_user.id)
+        ):
+            revoked["refresh"] = revoke_token(decoded)
+
+    try:
+        db.session.commit()
+    except SQLAlchemyError as exc:
+        db.session.rollback()
+        current_app.logger.exception("Failed to revoke token(s) on logout: %s", exc)
+        return (
+            jsonify(
+                {
+                    "error": "Internal Server Error",
+                    "message": "An internal error occurred. Please try again later.",
+                }
+            ),
+            500,
+        )
+
+    return (
+        jsonify(
+            {
+                "message": "Logged out successfully.",
+                "revoked": revoked,
+            }
+        ),
+        200,
+    )
+
+
+@users_bp.route("/auth/me", methods=["GET"])
+@jwt_required()
+def me():
+    """Return the account behind the access token.
+
+    Lets a frontend restore its session on reload: it has a stored token but
+    no user object, and this resolves one without a second login. Also the
+    cheapest way for a client to find out whether its token is still good.
+    """
+    return jsonify(current_user.to_dict()), 200
 
 @users_bp.route("/users/<int:user_id>", methods=["GET"])
+@jwt_required()
 def get_user(user_id):
-    """Return the user matching `user_id`, or a 404 JSON error naming the id."""
+    """Return the user matching `user_id`, restricted to that user or an admin.
+
+    The ownership check runs before the existence check on purpose: answering
+    404 for a stranger's id and 403 for a real one would turn this endpoint
+    into a way to enumerate which accounts exist. Non-owners get 403 either
+    way, and only the account holder (or an admin) can tell a missing id from
+    a present one.
+    """
+    forbidden = forbid_unless_self_or_admin(user_id)
+    if forbidden is not None:
+        return forbidden
+
     user = db.session.get(User, user_id)
     if user is None:
         return (
@@ -304,6 +526,7 @@ _PRODUCT_REQUIRED_FIELDS = ("category_id", "name", "price", "stock_quantity")
 
 
 @products_bp.route("", methods=["POST"])
+@admin_required
 def create_product():
     """Create a new product, persisted to the database.
 
@@ -507,16 +730,24 @@ def create_product():
     return jsonify(product.to_dict()), 201
 
 @products_bp.route("", methods=["GET"])
+@jwt_required(optional=True)
 def list_products():
-    """Return products, ordered by id.
+    """Return products, ordered by id. Public: no token required.
 
     Soft-deleted products (`is_delete = True`) are excluded by default,
     matching a real storefront (a soft-deleted product should not keep
-    showing up for sale). Pass `?include_deleted=true` to also list them,
-    e.g. for an admin view that needs to find and restore one.
+    showing up for sale). `?include_deleted=true` also lists them, for an
+    admin view that needs to find and restore one — and is therefore honored
+    only for an admin caller. Anyone else passing it gets the normal public
+    listing rather than a 403, since it is a display preference, not an
+    action being refused.
     """
     query = db.session.query(Product)
-    if request.args.get("include_deleted", "").strip().lower() not in ("true", "1"):
+    wants_deleted = request.args.get("include_deleted", "").strip().lower() in (
+        "true",
+        "1",
+    )
+    if not (wants_deleted and is_admin(current_user)):
         query = query.filter(Product.is_delete.is_(False))
 
     products = query.order_by(Product.id).all()
@@ -586,6 +817,7 @@ def validate_product_data(data, require_all=True):
     return None, None
 
 @products_bp.route('/<int:product_id>', methods=['PUT'])
+@admin_required
 def update_product(product_id):
     """Partially update a product.
 
@@ -675,6 +907,7 @@ def update_product(product_id):
     return jsonify(product.to_dict()), 200
 
 @products_bp.route('/<int:product_id>', methods=['DELETE'])
+@admin_required
 def delete_product(product_id):
     """Delete a product, blocked only while it has genuinely active orders.
 
@@ -790,6 +1023,7 @@ def delete_product(product_id):
 # ---------------------------------------------------------------------------
 
 @categories_bp.route("", methods=["POST"])
+@admin_required
 def create_category():
     """Create a new category.
 
@@ -914,6 +1148,7 @@ def get_category(category_id):
     return jsonify(payload)
 
 @categories_bp.route("/<int:category_id>", methods=["PUT"])
+@admin_required
 def update_category(category_id):
     """Partially update a category's `name` and/or `description`.
 
@@ -1020,6 +1255,7 @@ def update_category(category_id):
     return jsonify(category.to_dict()), 200
 
 @categories_bp.route("/<int:category_id>", methods=["DELETE"])
+@admin_required
 def delete_category(category_id):
     """Delete a category.
 
@@ -1078,18 +1314,19 @@ _ORDER_ITEM_REQUIRED_FIELDS = ("product_id", "quantity")
 
 
 @orders_bp.route("", methods=["POST"])
+@jwt_required()
 def create_order():
-    """Place a new order.
+    """Place a new order for the authenticated user.
 
-    There is no session/token authentication in this project (see the note
-    on `register_user`), so there is no server-side notion of a "logged-in
-    user" to read an id from. The caller passes `user_id` explicitly in the
-    body, the same way `create_product` requires an explicit `category_id`
-    rather than inferring one.
+    The order's owner is taken from the access token, not from the request
+    body. An earlier version of this endpoint read `user_id` out of the body
+    because the project had no authentication; keeping that now would mean any
+    caller could place orders in anyone else's name just by changing a number,
+    so a `user_id` in the body is ignored. There is deliberately no
+    "order on behalf of" path, not even for admins.
 
     Body shape:
       {
-        "user_id": 1,
         "items": [
           {"product_id": 2, "quantity": 1},
           {"product_id": 4, "quantity": 2}
@@ -1099,8 +1336,8 @@ def create_order():
     Validation sequence:
       1. Parse the body with `request.get_json(silent=True)`; a missing or
          malformed body returns 400.
-      2. Require a non-blank integer `user_id` referencing an existing
-         `User`; missing, wrong-typed, or unknown returns 400.
+      2. The owner comes from the token; `current_user` is guaranteed to
+         exist and be active by the time this runs (see `auth._user_lookup`).
       3. Require a non-empty list `items`; missing, wrong-typed, or empty
          returns 400.
       4. Each entry must be an object with an integer `product_id`
@@ -1138,29 +1375,8 @@ def create_order():
             400,
         )
 
-    user_id = body.get("user_id")
-    if user_id is None or isinstance(user_id, bool) or not isinstance(user_id, int):
-        return (
-            jsonify(
-                {
-                    "error": "Bad Request",
-                    "message": "Field 'user_id' must be a non-blank integer.",
-                }
-            ),
-            400,
-        )
-
-    user = db.session.get(User, user_id)
-    if user is None:
-        return (
-            jsonify(
-                {
-                    "error": "Bad Request",
-                    "message": f"user_id {user_id} does not reference an existing user.",
-                }
-            ),
-            400,
-        )
+    # Owner comes from the verified token, never from the body.
+    user_id = current_user.id
 
     items = body.get("items")
     if not isinstance(items, list) or not items:
@@ -1333,40 +1549,54 @@ def create_order():
     return jsonify(order.to_dict()), 201
 
 @orders_bp.route("", methods=["GET"])
+@jwt_required()
 def list_orders():
-    """Return orders for a user, ordered by id.
+    """Return the authenticated user's orders, ordered by id.
 
-    There is no session/token authentication in this project, so the
-    "current user" is whoever the caller names in the required `user_id`
-    query parameter, e.g. `GET /orders?user_id=1`.
+    `user_id` used to be a required query parameter, because there was no
+    authentication and the caller had to say who they were. It is now taken
+    from the access token, so `GET /orders` returns your own orders and
+    nothing else — a customer cannot read someone else's order history by
+    changing the number.
+
+    An admin may still pass `?user_id=<id>` to read a specific customer's
+    orders; for any other caller that parameter is refused with 403 rather
+    than quietly ignored, since silently returning your own orders when you
+    asked for someone else's would be misleading.
 
     Soft-deleted orders (`is_delete = True`) are excluded by default. Pass
     `?include_deleted=true` to also list them.
     """
-    raw_user_id = request.args.get("user_id")
-    if raw_user_id is None or not raw_user_id.isdigit():
-        return (
-            jsonify(
-                {
-                    "error": "Bad Request",
-                    "message": "Query parameter 'user_id' must be a positive integer.",
-                }
-            ),
-            400,
-        )
-    user_id = int(raw_user_id)
+    user_id = current_user.id
 
-    user = db.session.get(User, user_id)
-    if user is None:
-        return (
-            jsonify(
-                {
-                    "error": "Not Found",
-                    "message": f"User {user_id} was not found.",
-                }
-            ),
-            404,
-        )
+    raw_user_id = request.args.get("user_id")
+    if raw_user_id is not None:
+        if not raw_user_id.isdigit():
+            return (
+                jsonify(
+                    {
+                        "error": "Bad Request",
+                        "message": "Query parameter 'user_id' must be a positive integer.",
+                    }
+                ),
+                400,
+            )
+        requested_id = int(raw_user_id)
+        forbidden = forbid_unless_self_or_admin(requested_id)
+        if forbidden is not None:
+            return forbidden
+        user_id = requested_id
+
+        if db.session.get(User, user_id) is None:
+            return (
+                jsonify(
+                    {
+                        "error": "Not Found",
+                        "message": f"User {user_id} was not found.",
+                    }
+                ),
+                404,
+            )
 
     query = db.session.query(Order).filter(Order.user_id == user_id)
     if request.args.get("include_deleted", "").strip().lower() not in ("true", "1"):
@@ -1376,8 +1606,13 @@ def list_orders():
     return jsonify([order.to_dict() for order in orders])
 
 @orders_bp.route("/<int:order_id>", methods=["GET"])
+@jwt_required()
 def get_order(order_id):
     """Return an order with its order items and product details, or 404.
+
+    Readable only by the user the order belongs to, or by an admin: order
+    history includes what was bought and what was charged, so ids must not be
+    guessable into other people's receipts.
 
     Returned regardless of `is_delete`, so a soft-deleted order still
     resolves by id (e.g. from a receipt or admin recovery view), the same
@@ -1401,6 +1636,10 @@ def get_order(order_id):
             404,
         )
 
+    forbidden = forbid_unless_self_or_admin(order.user_id)
+    if forbidden is not None:
+        return forbidden
+
     item_rows = db.session.execute(
         select(
             order_items.c.product_id,
@@ -1423,8 +1662,15 @@ def get_order(order_id):
     return jsonify(payload)
 
 @orders_bp.route("/<int:order_id>", methods=["PUT"])
+@admin_required
 def update_order_status(order_id):
     """Update an order's `status`. This is the only field a client may change.
+
+    Admin-only. Status drives fulfilment and, for the stock-restoring
+    statuses, moves inventory back: letting a customer set their own order to
+    `CANCELLED` would hand them a way to return stock to the catalogue at
+    will, and setting it to `COMPLETED` would mark goods as shipped that
+    never were.
 
     Industry practice, and the reason this route is status-only: an order's
     line items and `unit_price` are a record of what was actually charged at
@@ -1554,8 +1800,12 @@ def update_order_status(order_id):
     return jsonify(order.to_dict()), 200
 
 @orders_bp.route("/<int:order_id>", methods=["DELETE"])
+@jwt_required()
 def delete_order(order_id):
     """Soft-delete an order: set `is_delete = True`, no row removed.
+
+    Allowed for the order's owner (hiding an order from their own history) or
+    an admin.
 
     Unconditional. Unlike `delete_product`, this does not inspect `status`
     first; any order, in any status, is soft-deleted on request. The row,
@@ -1575,6 +1825,10 @@ def delete_order(order_id):
             ),
             404,
         )
+
+    forbidden = forbid_unless_self_or_admin(order.user_id)
+    if forbidden is not None:
+        return forbidden
 
     order.is_delete = True
 

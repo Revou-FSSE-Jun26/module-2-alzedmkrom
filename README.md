@@ -2,7 +2,7 @@
 
 A Flask + SQLAlchemy application layer built on top of the existing, already-populated `revoshop_db` PostgreSQL database from Checkpoint 1. It exposes database-backed endpoints for products, categories, orders, and user registration/retrieval, a Flask-Migrate history that adds a `role` column to `users` and an `is_delete` soft-delete column to both `products` and `orders`, and `flask` CLI commands for connection verification and many-to-many demonstration data.
 
-Real session/token authentication is out of scope for this checkpoint (JWT is optional/exploratory only). The API is deployed on Railway with its database hosted on Supabase (see Live Demo below), and also runs locally.
+Authentication is implemented with JSON Web Tokens: short-lived access tokens, rotating refresh tokens, database-backed revocation so logout takes effect immediately, and role-based authorization separating customers from admins. See [Authentication](#authentication). The API is deployed on Railway with its database hosted on Supabase (see Live Demo below), and also runs locally.
 
 ## Live Demo
 
@@ -27,7 +27,12 @@ RevoShop is the backend for a small online store. It manages a catalog of **prod
 - **Full CRUD for products** — create, list, retrieve, update, and delete (`POST`/`GET`/`GET <id>`/`PUT`/`DELETE /products`).
 - **Full CRUD for categories** — create, list, retrieve (with the category's products), update, and delete (`/categories`).
 - **Full CRUD for orders** — place an order, list a user's orders, retrieve one order with its line items and product details, update status, and delete (`/orders`).
-- **User registration, retrieval, and a placeholder login** — `POST /users`, `GET /users/<id>`, `POST /auth/login`. Passwords are hashed with Werkzeug and never returned.
+- **User registration and retrieval** — `POST /users`, `GET /users/<id>`. Passwords are hashed with Werkzeug and never returned.
+- **JWT authentication** — `POST /auth/login`, `POST /auth/refresh`, `POST /auth/logout`, `GET /auth/me`. Short-lived access tokens with longer-lived refresh tokens, and every failure carrying a machine-readable `code` so a client can tell "refresh and retry" from "log out". See [Authentication](#authentication).
+- **Refresh-token rotation with an idle session timeout** — each refresh revokes the token it consumed and issues a new pair, so an active session slides forward while an idle one expires and forces a fresh login (the auto-logout).
+- **Immediate logout via database-backed revocation** — revoked tokens are recorded in `token_blocklist` and refused for the rest of their lifetime, rather than staying valid until they expire. Stored in the database, not in memory, so revocation holds across gunicorn workers and redeploys.
+- **Role-based authorization** — catalog reads are public, orders are scoped to the authenticated user, and product/category writes plus order status changes are admin-only. Roles are re-read from the database per request, so a demotion or deactivation takes effect immediately instead of when the token expires. `POST /users` refuses to honor a self-assigned `role`.
+- **CORS** — an explicit, environment-configured origin allowlist, so a browser frontend on another origin can call the API.
 - **Many-to-many between orders and products through `order_items`** — each order line stores its own `quantity` and the `unit_price` captured at order time, so an order is a faithful record of what was actually charged. `flask link-order-products` demonstrates one order linked to multiple products.
 - **Data validation** — every write endpoint validates required fields, types, ranges, and lengths, returning `400`/`422` with a clear message on bad input, and `409` on conflicts (duplicate category/user, delete blocked by references).
 - **Error handling with `try`/`except`** — all database writes are wrapped so an `IntegrityError` maps to `409` and any other `SQLAlchemyError` rolls back and maps to `500`, with the internal detail logged (never leaked). Framework 404/405 responses are also returned as JSON.
@@ -42,6 +47,8 @@ RevoShop is the backend for a small online store. It manages a catalog of **prod
 - **Flask** — web framework and routing (via blueprints).
 - **SQLAlchemy** — ORM and query layer.
 - **Flask-Migrate** (Alembic) — version-controlled schema migrations.
+- **Flask-JWT-Extended** — access/refresh token issuing, verification, and the revocation hook.
+- **Flask-Cors** — cross-origin access for the browser frontend.
 - **PostgreSQL** — the relational database (`revoshop_db`).
 - **pgAdmin** — GUI for inspecting the local database and tables.
 - **pytest** — the automated test suite.
@@ -53,11 +60,12 @@ RevoShop is the backend for a small online store. It manages a catalog of **prod
 ## Project Files
 
 - `schema.sql`, `seed.sql`, `queries.sql` — Checkpoint 1 database design, sample data, and verification queries. Unchanged by this checkpoint.
-- `config.py` — the `Config` class (database URI, `SECRET_KEY`).
-- `extensions.py` — the module-level `app`, `db = SQLAlchemy(app)`, and `migrate = Migrate(app, db)`.
-- `models.py` — `User`, `Category`, `Product`, `Order`, and the `order_items` association table.
-- `routes.py` — `home_bp`, `products_bp`, `categories_bp`, `orders_bp`, and `users_bp`, all database-backed.
+- `config.py` — the `Config` class (database URIs, `SECRET_KEY`, CORS origins, JWT lifetimes, admin role name).
+- `extensions.py` — the module-level `app`, `db = SQLAlchemy(app)`, `migrate = Migrate(app, db)`, `cors`, and `jwt = JWTManager(app)`.
+- `models.py` — `User`, `Category`, `Product`, `Order`, `TokenBlocklist`, and the `order_items` association table.
+- `routes.py` — `home_bp`, `products_bp`, `categories_bp`, `orders_bp`, and `users_bp` (which also carries the `/auth/*` endpoints), all database-backed.
 - `errors.py` — JSON error handlers for 400/404/405/500.
+- `auth.py` — the JWT callbacks (identity, user lookup, revocation check, JSON failure responses) and the `admin_required` / owner-or-admin guards used by `routes.py`.
 - `cli.py` — `flask check-db` and `flask link-order-products`.
 - `locustfile.py` — Locust load test simulating a shopper journey (list products, view one, place an order, view that order).
 - `app.py` — entry point; registers blueprints and runs the dev server.
@@ -141,7 +149,7 @@ Uses `FLASK_APP=app.py` from `.flaskenv` to find the app, and `FLASK_DEBUG=1` fr
 
 ## Migrations
 
-The migration history is baselined on top of the already-populated `revoshop_db` rather than recreating it. The `migrations/versions/` directory contains five revisions, applied in this order:
+The migration history is baselined on top of the already-populated `revoshop_db` rather than recreating it. The `migrations/versions/` directory contains six revisions, applied in this order:
 
 | Order | Revision ID | File | Description |
 |---|---|---|---|
@@ -149,7 +157,8 @@ The migration history is baselined on top of the already-populated `revoshop_db`
 | 2 | `44a808644adc` | `44a808644adc_add_unique_constraints_to_users_.py` | Adds plain unique constraints (`users_username_key`, `users_email_key`) on `users.username`/`users.email`, on top of the existing case-insensitive functional indexes. |
 | 3 | `67d9a832861f` | `67d9a832861f_add_role_to_users.py` | Adds `users.role` (`VARCHAR(50) NOT NULL`) with a server default of `'CUSTOMER'`, backfilling all existing rows in the same statement. |
 | 4 | `48a1dad68d30` | `48a1dad68d30_add_is_active_to_products.py` | Adds `products.is_active` (`BOOLEAN NOT NULL`) with a server default of `true`, backfilling all existing rows in the same statement. Superseded by revision 5 below. |
-| 5 | `e4e6cb9cdcda` | `e4e6cb9cdcda_add_order_is_delete_rename_product_is_.py` | Adds `orders.is_delete` (`BOOLEAN NOT NULL`, default `false`). Renames `products.is_active` to `products.is_delete`, inverting both the column's polarity and its data (`is_delete = NOT is_active`) so both tables use the same `is_delete` naming/meaning. This is the current head. |
+| 5 | `e4e6cb9cdcda` | `e4e6cb9cdcda_add_order_is_delete_rename_product_is_.py` | Adds `orders.is_delete` (`BOOLEAN NOT NULL`, default `false`). Renames `products.is_active` to `products.is_delete`, inverting both the column's polarity and its data (`is_delete = NOT is_active`) so both tables use the same `is_delete` naming/meaning. |
+| 6 | `56e0d1e07c3f` | `56e0d1e07c3f_add_token_blocklist_for_jwt_revocation.py` | Adds the `token_blocklist` table (`jti` unique, `token_type`, `user_id` FK with `ON DELETE CASCADE`, `expires_at`, `revoked_at`) plus indexes on `jti` and `expires_at`. Backs JWT revocation, so logout takes effect immediately instead of when the token expires. This is the current head. |
 
 ### Commands used
 
@@ -209,7 +218,114 @@ flask check-db
 
 and confirm the row counts read 10 / 4 / 10 / 30 / 56 (a fresh Checkpoint 1 seed inserts 54 order_items; the two extra come from `flask link-order-products`, which extends order 4 for the many-to-many demonstration). The `users` count may read higher than 10 if `POST /users` has been exercised since seeding, and `orders`/`order_items` may read higher after local API or Locust testing; that is expected and does not indicate data loss, since the original seeded rows are still present. Re-running `queries.sql` in a database client should still return no rows from its integrity checks.
 
+## Authentication
+
+Access tokens are sent in the `Authorization` header:
+
+```
+Authorization: Bearer <access_token>
+```
+
+### Who can reach what
+
+| Access | Endpoints |
+| --- | --- |
+| **Public** (no token) | `GET /`, `POST /users`, `POST /auth/login`, `GET /products`, `GET /products/<id>`, `GET /categories`, `GET /categories/<id>` |
+| **Any logged-in user** | `GET /auth/me`, `POST /auth/refresh`, `POST /auth/logout`, `GET /users/<id>` (self), `POST /orders`, `GET /orders`, `GET /orders/<id>` (own), `DELETE /orders/<id>` (own) |
+| **Admin only** (`role = 'ADMIN'`) | `POST`/`PUT`/`DELETE /products`, `POST`/`PUT`/`DELETE /categories`, `PUT /orders/<id>`, plus any other user's orders and `GET /users/<id>` for any id |
+
+Two distinct refusals, and they mean different things:
+
+- **401** — not authenticated (no token, expired, revoked, malformed). Authenticate and retry.
+- **403** — authenticated fine, but not allowed. Retrying with the same account will not help.
+
+### The four auth endpoints
+
+**`POST /auth/login`** — exchange credentials for a token pair.
+
+```json
+// request
+{ "email": "alice@example.com", "password": "hunter2" }
+
+// 200
+{
+  "access_token": "eyJ...",
+  "refresh_token": "eyJ...",
+  "token_type": "Bearer",
+  "expires_in": 900,
+  "refresh_expires_in": 604800,
+  "user": { "id": 1, "username": "alice", "role": "CUSTOMER", ... }
+}
+```
+
+`expires_in` and `refresh_expires_in` are seconds, so a client can refresh shortly before the access token lapses instead of waiting to be surprised by a 401. A wrong password and an unknown email return the identical 401 (`"code": "invalid_credentials"`), so the endpoint cannot be used to discover which accounts exist. A deactivated account gets `"code": "account_inactive"`.
+
+**`POST /auth/refresh`** — send the **refresh** token in the header, receive a new pair.
+
+The refresh token presented is revoked as part of the exchange (rotation), so each one is single-use. Store both halves of the response; keeping the old refresh token guarantees a `token_revoked` failure next time.
+
+**`POST /auth/logout`** — send the **access** token in the header, and the refresh token in the body:
+
+```json
+{ "refresh_token": "eyJ..." }
+```
+
+Both are then rejected for the rest of their natural lifetime. Sending the refresh token is optional but strongly recommended: omit it and a working refresh token survives, so the session is not really over. A malformed value there is ignored rather than rejected — the point of logout is that the caller ends up logged out.
+
+**`GET /auth/me`** — the account behind the access token. Useful for restoring a session on page reload, and the cheapest way to ask "is my token still good?".
+
+### Session timeout and auto-logout
+
+Two timers, with different meanings:
+
+| Token | Default | Expiry means |
+| --- | --- | --- |
+| Access | 15 min (`JWT_ACCESS_MINUTES`) | Recoverable. Refresh and retry; the user notices nothing. |
+| Refresh | 7 days (`JWT_REFRESH_MINUTES`) | The session is over. Clear both tokens and show the login screen. |
+
+Because every refresh rotates the token, the refresh lifetime behaves as an **idle** timeout: an active client keeps trading its way forward indefinitely, while a client that goes quiet for longer than that window cannot renew and has to log in again. That is the auto-logout. Set `JWT_REFRESH_MINUTES` low (say `2`) to watch it happen.
+
+Errors carry a machine-readable `code`, and an expiry also echoes which token expired, so a frontend can branch without parsing prose:
+
+```json
+// 401 — access token aged out: refresh and retry
+{ "error": "Unauthorized", "message": "Access token expired. ...",
+  "code": "token_expired", "token_type": "access" }
+
+// 401 — from POST /auth/refresh: the session is over, log out
+{ "error": "Unauthorized", "message": "Session expired. Please log in again.",
+  "code": "token_expired", "token_type": "refresh" }
+```
+
+Full set of codes: `authorization_required`, `token_expired`, `token_revoked`, `token_invalid`, `user_unavailable`, `admin_required`, `forbidden`, `invalid_credentials`, `account_inactive`, `fresh_token_required`.
+
+### Suggested frontend flow
+
+1. Log in, keep both tokens.
+2. Send the access token on every authenticated request.
+3. On a 401 with `code = "token_expired"` and `token_type = "access"`: call `/auth/refresh`, replace **both** tokens, replay the original request once.
+4. On any other 401 (including a `token_expired` refresh, or `token_revoked`): discard both tokens and redirect to login.
+5. On logout, call `/auth/logout` with the refresh token in the body before clearing local state.
+
+### Roles
+
+`users.role` defaults to `'CUSTOMER'`. `POST /users` **ignores** a caller-supplied `role` unless the request already carries an admin token — otherwise anyone could mint themselves an admin account with one unauthenticated request. The first admin therefore has to be promoted directly in the database:
+
+```sql
+UPDATE users SET role = 'ADMIN' WHERE email = 'you@example.com';
+```
+
+Role is re-read from the database on every request rather than trusted from the token claim, so promoting, demoting, or deactivating an account takes effect on that account's next request instead of whenever its current token happens to expire.
+
+### Notes
+
+- Tokens are read from the `Authorization` header only. Cookies are deliberately not enabled: the API is called cross-origin by a browser frontend, and cookie-based JWT would need CSRF protection as well.
+- Revocations live in the `token_blocklist` table, not in memory, because gunicorn runs multiple workers (a token revoked in one would still be accepted by the others) and a redeploy would otherwise silently un-revoke everything.
+- Accounts created by `seed.sql` **cannot log in**: it stores placeholder strings such as `hash_budi_001` in `password_hash` rather than real Werkzeug hashes. Register through `POST /users` to get a usable account.
+
 ## Endpoints
+
+Authorization per endpoint is summarized in [Authentication](#who-can-reach-what) above; the descriptions below cover request/response shapes and validation.
 
 All error responses (including framework-generated 404s and 405s) are returned as JSON:
 
@@ -618,12 +734,15 @@ Response — `409 Conflict` (still has products):
 
 ### POST /orders
 
-Places an order. Requires `user_id` (integer referencing an existing user) and a non-empty `items` array, each item an object with `product_id` (existing product) and `quantity` (integer > 0, not exceeding the product's current stock). The same `product_id` cannot appear twice. The server sets `status` to `PENDING` and computes `total_price` itself; `unit_price` is captured from each product's current price, and each product's `stock_quantity` is decremented. If any item fails validation the whole order is rejected (all-or-nothing).
+Places an order **for the authenticated user**. Requires an access token; the owner comes from that token, so there is no `user_id` in the body (one sent anyway is ignored, and cannot redirect the order to another account). There is no "order on behalf of" path, not even for admins.
+
+Requires a non-empty `items` array, each item an object with `product_id` (existing product) and `quantity` (integer > 0, not exceeding the product's current stock). The same `product_id` cannot appear twice. The server sets `status` to `PENDING` and computes `total_price` itself; `unit_price` is captured from each product's current price, and each product's `stock_quantity` is decremented. If any item fails validation the whole order is rejected (all-or-nothing).
 
 ```sh
 curl -X POST http://127.0.0.1:5000/orders \
   -H "Content-Type: application/json" \
-  -d '{"user_id": 1, "items": [{"product_id": 3, "quantity": 2}, {"product_id": 6, "quantity": 1}]}'
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -d '{"items": [{"product_id": 3, "quantity": 2}, {"product_id": 6, "quantity": 1}]}'
 ```
 
 Response — `201 Created`:
@@ -644,7 +763,8 @@ Request (insufficient stock):
 ```sh
 curl -X POST http://127.0.0.1:5000/orders \
   -H "Content-Type: application/json" \
-  -d '{"user_id": 1, "items": [{"product_id": 5, "quantity": 9999}]}'
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -d '{"items": [{"product_id": 5, "quantity": 9999}]}'
 ```
 
 Response — `400 Bad Request`:
@@ -658,10 +778,13 @@ Response — `400 Bad Request`:
 
 ### GET /orders
 
-Returns the orders belonging to one user, ordered by `id`. `user_id` is a **required** query parameter (there is no session/token auth, so the caller names the user directly). Soft-deleted orders are excluded by default; pass `&include_deleted=true` to include them.
+Returns the **authenticated user's** orders, ordered by `id`. Requires an access token. `user_id` used to be a required query parameter; it is now taken from the token, so a customer cannot read someone else's history by changing a number.
+
+An admin may pass `?user_id=<id>` to read a specific customer's orders. Any other caller passing it gets 403 rather than a silent fallback to their own orders. Soft-deleted orders are excluded by default; pass `?include_deleted=true` to include them.
 
 ```sh
-curl "http://127.0.0.1:5000/orders?user_id=1"
+curl "http://127.0.0.1:5000/orders" \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
 ```
 
 Response — `200 OK`:
@@ -851,37 +974,103 @@ Response — `404 Not Found`:
 
 ### POST /auth/login
 
-Authenticates a user by `email` and `password`. This is a placeholder for this checkpoint: on success it returns `200 OK` with the user's data (no token or session is issued — session/token auth is out of scope, see the note under `create_order`). Requires both `email` and `password` in the body.
+Authenticates a user by `email` and `password` and returns an access/refresh token pair. Requires both fields in the body. See [Authentication](#authentication) for the full token lifecycle; this section covers the request/response shape.
+
+Note that accounts created by `seed.sql` cannot log in — it stores placeholder strings such as `hash_budi_001` in `password_hash` rather than real Werkzeug hashes. Register through `POST /users` first.
 
 ```sh
 curl -X POST http://127.0.0.1:5000/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"email": "budi@mail.com", "password": "the-users-password"}'
+  -d '{"email": "alice@example.com", "password": "the-users-password"}'
 ```
 
 Response — `200 OK`:
 
 ```json
 {
-  "id": 1,
-  "username": "budi_santoso",
-  "email": "budi@mail.com",
-  "is_active": true,
-  "role": "CUSTOMER",
-  "created_at": "2026-08-01T09:30:00+00:00"
+  "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "refresh_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+  "token_type": "Bearer",
+  "expires_in": 900,
+  "refresh_expires_in": 604800,
+  "user": {
+    "id": 11,
+    "username": "alice",
+    "email": "alice@example.com",
+    "is_active": true,
+    "role": "CUSTOMER",
+    "created_at": "2026-09-29T09:30:00+00:00"
+  }
 }
 ```
 
-Request (missing credentials) returns `400 Bad Request`. Wrong email or password returns:
+Missing or non-string credentials return `400 Bad Request`. A wrong password and an unknown email return the **identical** response, so the endpoint cannot be used to discover which accounts exist:
 
 Response — `401 Unauthorized`:
 
 ```json
 {
   "error": "Unauthorized",
-  "message": "Invalid email or password."
+  "message": "Invalid email or password.",
+  "code": "invalid_credentials"
 }
 ```
+
+A deactivated account (`is_active = false`) is refused separately, since that is a state the account holder can act on rather than a credential mistake:
+
+```json
+{
+  "error": "Unauthorized",
+  "message": "This account has been deactivated.",
+  "code": "account_inactive"
+}
+```
+
+### POST /auth/refresh
+
+Exchanges a **refresh** token for a new access/refresh pair. Send the refresh token — not the access token — in the header.
+
+```sh
+curl -X POST http://127.0.0.1:5000/auth/refresh \
+  -H "Authorization: Bearer $REFRESH_TOKEN"
+```
+
+Response — `200 OK`: same shape as `POST /auth/login`.
+
+The refresh token presented is revoked as part of the exchange, so store both halves of the response. Replaying a rotated token returns `401` with `"code": "token_revoked"`; an expired one returns `401` with `"code": "token_expired"` and `"token_type": "refresh"`, meaning the session is over.
+
+### POST /auth/logout
+
+Revokes the caller's tokens immediately, rather than leaving them usable until they expire. Send the **access** token in the header, and the refresh token in the body.
+
+```sh
+curl -X POST http://127.0.0.1:5000/auth/logout \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -d "{\"refresh_token\": \"$REFRESH_TOKEN\"}"
+```
+
+Response — `200 OK`:
+
+```json
+{
+  "message": "Logged out successfully.",
+  "revoked": { "access": true, "refresh": true }
+}
+```
+
+The body is optional, but omitting it leaves a working refresh token that can mint new access tokens, so the session would not really be over — `revoked.refresh` then reads `false`. A malformed value, or a refresh token belonging to a different account, is ignored rather than rejected; the response still reads `200` as long as the access token was revoked.
+
+### GET /auth/me
+
+Returns the account behind the access token. Useful for restoring a session after a page reload, and the cheapest way to check whether a stored token is still valid.
+
+```sh
+curl http://127.0.0.1:5000/auth/me \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+Response — `200 OK`: the user object, same shape as `GET /users/<id>`.
 
 ## CLI Commands
 
@@ -936,14 +1125,27 @@ Running the command again reports the same total and the same three products, si
 
 ## Load Testing
 
-`locustfile.py` simulates a sequential shopper journey against the local server, one pass per simulated user, repeated on a loop:
+`locustfile.py` simulates a sequential shopper journey against the local server. Each simulated user authenticates once, in `on_start`, then repeats the journey on a loop:
 
-1. `GET /products` — list all products, pick a random one that is in stock and not soft-deleted.
+**Once per simulated user:**
+
+0. `POST /users` then `POST /auth/login` — register a throwaway account and obtain an access/refresh token pair.
+
+**Then, on a loop:**
+
+1. `GET /products` — list all products, pick a random one.
 2. `GET /products/<id>` — fetch that product.
-3. `POST /orders` — place a 1-unit order for it, as an existing seeded user (`user_id=1`; there is no session/token auth in this project, so `user_id` is just a request body field — see the "Logged-in user" note under `create_order` in `routes.py`).
-4. `GET /orders/<id>` — fetch the order just created.
+3. `POST /orders` — place a 1-unit order for it, sending `Authorization: Bearer <access token>`. The order's owner comes from that token, so there is no `user_id` in the body.
+4. `GET /orders/<id>` — fetch the order just created (also authenticated).
+5. `POST /auth/refresh` — on roughly one journey in five, rotate the token pair.
 
-The Statistics table groups `GET /products/<id>` and `GET /orders/<id>` under the fixed labels `/products/[id]` and `/orders/[id]` (via Locust's `name=` parameter) rather than one row per distinct id, so a full run's results fit in exactly four rows: `GET /products`, `GET /products/[id]`, `POST /orders`, `GET /orders/[id]`.
+Each user registers its own account rather than reusing a seeded one, because accounts from `seed.sql` cannot log in: it stores placeholder strings such as `hash_budi_001` in `password_hash` instead of real Werkzeug hashes. Set `LOCUST_EMAIL` and `LOCUST_PASSWORD` to share one existing account instead (closer to a hot-key scenario than to real traffic).
+
+The refresh step is included deliberately. Rotation writes a row to `token_blocklist`, and every authenticated request reads that table, so the refresh path has a database cost that belongs in the measurements rather than being assumed cheap.
+
+The Statistics table groups per-id requests under the fixed labels `/products/[id]` and `/orders/[id]` (via Locust's `name=` parameter) rather than one row per distinct id, so a run's results fit in a handful of rows: `/users (register)`, `/auth/login`, `GET /products`, `/products/[id]`, `POST /orders`, `/orders/[id]`, and `/auth/refresh`.
+
+An expired access token on `POST /orders` is the one failure treated as recoverable: the journey refreshes and carries on, rather than counting the server as broken. Every other non-201 — including a 400 from insufficient stock — is recorded as a failure, so stock depletion shows up in the numbers instead of being hidden.
 
 ### Running it
 
@@ -974,11 +1176,13 @@ locust -f locustfile.py --host=http://127.0.0.1:5000 \
 
 ### After a run
 
-Because Locust hits `revoshop_test`, your main `revoshop_db` is completely unaffected. If you want a clean `revoshop_test` for the next run, truncate the orders and order_items tables and reset stock:
+Because Locust hits `revoshop_test`, your main `revoshop_db` is completely unaffected. A run now also leaves behind one `users` row per simulated user and one `token_blocklist` row per refresh, on top of the orders. To clean up for the next run:
 
 ```sql
 -- in psql or pgAdmin, connected to revoshop_test
-TRUNCATE order_items, orders RESTART IDENTITY;
+TRUNCATE order_items, orders RESTART IDENTITY CASCADE;
+DELETE FROM token_blocklist;
+DELETE FROM users WHERE username LIKE 'locust\_%';
 UPDATE products SET stock_quantity = seed_value, is_delete = false;
 ```
 

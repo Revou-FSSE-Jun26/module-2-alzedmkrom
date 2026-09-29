@@ -17,9 +17,11 @@ from routes import categories_bp, home_bp, orders_bp, products_bp, users_bp
 # Imported for their registration side effects, not for any name they export:
 #   models  puts the tables on db.metadata so Alembic autogenerate sees them
 #   errors  registers the JSON error handlers on `app`
+#   auth    registers the JWT identity/blocklist/failure callbacks on `jwt`
 #   cli     registers the custom `flask` commands on `app`
 import models  # noqa: F401
 import errors  # noqa: F401
+import auth  # noqa: F401
 import cli  # noqa: F401
 
 app.register_blueprint(home_bp)

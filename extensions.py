@@ -7,6 +7,7 @@ The only project import allowed here is ``Config`` from ``config``.
 
 from flask import Flask
 from flask_cors import CORS
+from flask_jwt_extended import JWTManager
 from flask_migrate import Migrate
 from flask_sqlalchemy import SQLAlchemy
 
@@ -30,3 +31,9 @@ cors = CORS(
     resources={r"/*": {"origins": app.config["CORS_ORIGINS"]}},
     supports_credentials=False,
 )
+
+# JWT access/refresh tokens. The manager is created here, but its callbacks
+# (blocklist check, user loader, and the JSON error responses) live in
+# ``auth.py``, which imports this object — the same import-side-effect pattern
+# ``errors.py`` uses, and the reason ``app.py`` imports ``auth``.
+jwt = JWTManager(app)

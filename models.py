@@ -119,6 +119,65 @@ class User(db.Model):
         return f"<User {self.id} {self.username}>"
 
 
+class TokenBlocklist(db.Model):
+    """A JWT that has been revoked before its own expiry.
+
+    JWTs are self-contained: the server does not store a session, so a token
+    stays valid until its `exp` passes. That makes a real logout impossible
+    without recording revocations somewhere, which is what this table is for.
+    ``auth.py`` registers a ``token_in_blocklist_loader`` that looks up every
+    incoming token's ``jti`` here.
+
+    It is a database table rather than an in-process set because neither of
+    the two things that would break an in-memory blocklist is avoidable in
+    this deployment: gunicorn runs more than one worker (a token revoked in
+    one worker would still be accepted by the others), and a restart or
+    redeploy would silently un-revoke everything.
+
+    Rows outlive the token only until ``expires_at``; after that the token is
+    rejected on its own expiry and the row is just clutter. ``flask
+    prune-tokens`` (see cli.py) deletes those.
+    """
+
+    __tablename__ = "token_blocklist"
+
+    id = db.Column(db.Integer, primary_key=True)
+
+    # The JWT ID claim: a UUID4 string that flask-jwt-extended puts in every
+    # token it mints, unique per token.
+    jti = db.Column(db.String(36), nullable=False, unique=True)
+
+    # 'access' or 'refresh', kept for auditing and so logout can report which
+    # token types it actually revoked.
+    token_type = db.Column(db.String(16), nullable=False)
+
+    user_id = db.Column(
+        db.Integer,
+        db.ForeignKey("users.id", ondelete="CASCADE", name="fk_blocklist_user"),
+        nullable=False,
+    )
+
+    # Mirrors the token's own `exp`, so expired rows can be pruned without
+    # decoding anything.
+    expires_at = db.Column(db.DateTime(timezone=True), nullable=False)
+
+    revoked_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        server_default=func.current_timestamp(),
+    )
+
+    __table_args__ = (
+        # Every authenticated request looks a jti up here, so this index is on
+        # the hot path rather than a nicety.
+        db.Index("idx_token_blocklist_jti", "jti"),
+        db.Index("idx_token_blocklist_expires_at", "expires_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<TokenBlocklist {self.token_type} user={self.user_id}>"
+
+
 class Category(db.Model):
     """A product category."""
 

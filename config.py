@@ -1,6 +1,7 @@
 """Application configuration."""
 
 import os
+from datetime import timedelta
 
 from dotenv import load_dotenv
 
@@ -8,6 +9,24 @@ from dotenv import load_dotenv
 # variable already set (e.g. by the real shell/host env in production), so
 # this is safe to call unconditionally.
 load_dotenv()
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    """Read `name` as a positive integer, falling back to `default`.
+
+    A blank, non-numeric, or non-positive value falls back rather than
+    raising, so a typo in a deployment environment variable cannot produce a
+    token lifetime of zero (which would reject every request immediately) or
+    crash the app at import time.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
 
 
 class Config:
@@ -61,3 +80,49 @@ class Config:
         ).split(",")
         if origin.strip()
     ]
+
+    # -- JWT authentication -------------------------------------------------
+    # Signing key for tokens. Kept separate from `SECRET_KEY` so the token
+    # signing key can be rotated (invalidating every outstanding token)
+    # without also invalidating anything else signed with `SECRET_KEY`.
+    # Falls back to `SECRET_KEY` when unset, so no extra variable is required
+    # for the app to boot.
+    JWT_SECRET_KEY = os.environ.get("JWT_SECRET_KEY", "").strip() or os.environ["SECRET_KEY"]
+
+    # Tokens are read from the `Authorization: Bearer <token>` header only.
+    # Cookies are deliberately not enabled: this API is called cross-origin by
+    # a browser frontend, and cookie-based JWT would need CSRF protection and
+    # `supports_credentials` on the CORS config to work safely.
+    JWT_TOKEN_LOCATION = ["headers"]
+    JWT_HEADER_NAME = "Authorization"
+    JWT_HEADER_TYPE = "Bearer"
+
+    # Access token lifetime. Short by design: an access token cannot be
+    # revoked cheaply on every request, so a small window limits how long a
+    # leaked one is useful. The frontend is expected to treat a
+    # `token_expired` 401 as "silently call POST /auth/refresh and retry".
+    JWT_ACCESS_TOKEN_EXPIRES = timedelta(
+        minutes=_positive_int_env("JWT_ACCESS_MINUTES", 15)
+    )
+
+    # Refresh token lifetime, and with refresh-token rotation this is
+    # effectively the *idle* timeout that produces the auto-logout: every
+    # successful POST /auth/refresh issues a new refresh token and revokes
+    # the one just used, so an actively-used session keeps sliding forward
+    # while an idle one eventually expires and forces a fresh login.
+    # Default 7 days (10080 minutes). Set to e.g. 30 for a 30-minute idle
+    # window.
+    JWT_REFRESH_TOKEN_EXPIRES = timedelta(
+        minutes=_positive_int_env("JWT_REFRESH_MINUTES", 60 * 24 * 7)
+    )
+
+    # Checked by the blocklist loader in auth.py. Both token types are
+    # checked so that logout can revoke the refresh token (ending the
+    # session) and the access token (ending the current request window).
+    JWT_BLOCKLIST_ENABLED = True
+    JWT_BLOCKLIST_TOKEN_CHECKS = ["access", "refresh"]
+
+    # Role name that unlocks the admin-only endpoints (product/category
+    # writes, order status changes). Compared case-insensitively against
+    # `users.role`, whose server default is 'CUSTOMER'.
+    ADMIN_ROLE = os.environ.get("ADMIN_ROLE", "ADMIN").strip() or "ADMIN"

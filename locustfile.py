@@ -1,10 +1,12 @@
 """Locust load test for RevoShop.
 
-Simulates a sequential user journey against the local Flask server:
-  1. GET  /products             list all products
-  2. GET  /products/<id>        fetch a single product from that list
-  3. POST /orders                place a new order for that product
-  4. GET  /orders/<id>           fetch the order just created
+Simulates a sequential shopper journey against a running server:
+  1. POST /users + POST /auth/login   once per simulated user, in on_start
+  2. GET  /products                   list all products (public)
+  3. GET  /products/<id>              fetch a single product from that list
+  4. POST /orders                     place an order  (requires access token)
+  5. GET  /orders/<id>                fetch the order just created (token)
+  6. POST /auth/refresh               occasionally, to rotate tokens
 
 Run locally (server must already be running, e.g. `flask run`):
 
@@ -16,39 +18,54 @@ to 200, spawn rate a few per second), or run headless:
     locust -f locustfile.py --host=http://127.0.0.1:5000 \
         --users 200 --spawn-rate 10 --run-time 2m --headless
 
-Uses an existing seeded user (id 1) rather than registering a new one per
-simulated user, so the journey stays focused on products/orders and does
-not create a new user row on every single iteration.
+Authentication
+--------------
+The order endpoints require `Authorization: Bearer <access token>` and take
+the order's owner from that token, so there is no `user_id` in the request
+body any more.
+
+Each simulated user registers its own throwaway account in `on_start` and
+logs in with it. It does not reuse a seeded account, for a concrete reason:
+`seed.sql` stores placeholder strings such as `hash_budi_001` in
+`password_hash` rather than real Werkzeug hashes, so no seeded user can
+authenticate at all. Registering also keeps the test self-contained — it
+works against a freshly migrated database with no manual setup.
+
+Set `LOCUST_EMAIL` and `LOCUST_PASSWORD` to log in as one existing account
+instead (every simulated user then shares it, which is closer to a hot-key
+scenario than to real traffic).
+
+`POST /auth/refresh` runs on roughly one journey in five. It is included
+because refreshing is not free: rotation writes a row to `token_blocklist`
+and every authenticated request reads that table, so the refresh path
+deserves to appear in the numbers rather than being assumed cheap.
 
 IMPORTANT — cleanup after running this:
 
-`create_order` commits real rows against whatever database `DATABASE_URL`
-points at (your real local `revoshop_db` if you're running this the normal
-way) and deducts real `stock_quantity`. Nothing about this file, or a
-normal HTTP request in general, reverts those writes automatically — they
-are permanent commits, same as if you'd typed the inserts by hand. A run
-with enough users/duration can deplete every product's stock to 0, at
-which point `list_products` below starts failing on purpose (see its
-"No active, in-stock products available" check) rather than silently
-placing bad orders. `create_order` now treats any non-201 from
-`POST /orders` as a Locust failure, so a 400 from insufficient/zero stock
-shows up in the failure stats rather than being counted as success.
+`create_order` commits real rows and deducts real `stock_quantity`. Nothing
+here reverts those writes — they are permanent commits, same as if typed by
+hand. Registration and refresh also leave rows behind (`users`, and
+`token_blocklist`). A long run can deplete every product's stock to 0, after
+which `POST /orders` starts failing on insufficient stock.
 
-Run against `revoshop_test` (the dedicated load-test database) rather than
-`revoshop_db`, and orders/stock changes from Locust stay isolated there
-without affecting your real data. See `.env.example` for how to set
-`DATABASE_URL` to point at `revoshop_test` before starting `flask run`.
+Point the server at a throwaway database before running this, not at data you
+care about. See `.env.example` for how to set `DATABASE_URL` for a load-test
+database before starting `flask run`.
 """
 
+import os
 import random
+import uuid
 
 from locust import HttpUser, SequentialTaskSet, between, task
 
-# A real, already-seeded user id (see seed.sql). Every simulated user places
-# orders "as" this account; there is no session/token auth in this project
-# (see the note on `create_order` in routes.py), so `user_id` is just a
-# request body field, not a login.
-EXISTING_USER_ID = 1
+# Optional: log in as an existing account instead of registering one.
+# Both must be set for this to take effect.
+EXISTING_EMAIL = os.environ.get("LOCUST_EMAIL", "").strip()
+EXISTING_PASSWORD = os.environ.get("LOCUST_PASSWORD", "").strip()
+
+# Password used for the throwaway accounts this file registers.
+GENERATED_PASSWORD = "LocustLoadTest!2026"
 
 
 class ProductAndOrderJourney(SequentialTaskSet):
@@ -58,9 +75,18 @@ class ProductAndOrderJourney(SequentialTaskSet):
         self.product_id = None
         self.order_id = None
 
+    # -- helpers ------------------------------------------------------------
+
+    @property
+    def auth_headers(self):
+        """Bearer header for the parent user's current access token."""
+        return {"Authorization": f"Bearer {self.user.access_token}"}
+
+    # -- journey ------------------------------------------------------------
+
     @task
     def list_products(self):
-        """1. GET /products — list all products, remember one id."""
+        """1. GET /products — list all products, remember one id. Public."""
         with self.client.get("/products", catch_response=True) as resp:
             if resp.status_code != 200:
                 resp.failure(f"GET /products returned {resp.status_code}")
@@ -71,18 +97,13 @@ class ProductAndOrderJourney(SequentialTaskSet):
                 resp.failure("GET /products returned an empty list")
                 return
 
-            # A random in-stock, non-soft-deleted product, so repeated runs
-            # don't hammer the same row's stock_quantity down to zero and
-            # never pick a product that create_order would reject. GET
-            # /products already excludes is_delete=True rows by default
-            # (no ?include_deleted=true here), but this filter is kept as a
-            # defense-in-depth check in case that default ever changes.
-
+            # A random product, so repeated runs don't hammer the same row's
+            # stock_quantity down to zero.
             self.product_id = random.choice(products)["id"]
 
     @task
     def get_single_product(self):
-        """2. GET /products/<id> — fetch the product picked above."""
+        """2. GET /products/<id> — fetch the product picked above. Public."""
         if self.product_id is None:
             return
 
@@ -94,32 +115,54 @@ class ProductAndOrderJourney(SequentialTaskSet):
 
     @task
     def create_order(self):
-        """3. POST /orders — place a 1-unit order for that product."""
-        if self.product_id is None:
+        """3. POST /orders — place a 1-unit order. Requires an access token.
+
+        Any non-201 counts as a real failure, including a 400 from
+        insufficient/zero stock, so stock depletion shows up in the failure
+        stats instead of being hidden as success.
+        """
+        if self.product_id is None or not self.user.access_token:
             return
 
-        body = {
-            "user_id": EXISTING_USER_ID,
-            "items": [{"product_id": self.product_id, "quantity": 1}],
-        }
-        with self.client.post("/orders", json=body, catch_response=True) as resp:
-            if resp.status_code != 201:
-                # Any non-201 counts as a real failure, including a 400 from
-                # ordering a product with insufficient/zero stock. This
-                # surfaces stock-depletion in the Locust failure stats
-                # instead of hiding it as success.
-                resp.failure(f"POST /orders returned {resp.status_code}")
+        body = {"items": [{"product_id": self.product_id, "quantity": 1}]}
+        with self.client.post(
+            "/orders", json=body, headers=self.auth_headers, catch_response=True
+        ) as resp:
+            if resp.status_code == 201:
+                self.order_id = resp.json()["id"]
                 return
 
-            self.order_id = resp.json()["id"]
+            # An expired access token is the one recoverable failure: refresh
+            # and let the next journey proceed, rather than counting the
+            # server as broken.
+            if resp.status_code == 401 and resp.json().get("code") == "token_expired":
+                resp.success()
+                self.user.refresh_access_token()
+                return
+
+            resp.failure(f"POST /orders returned {resp.status_code}")
+
+    @task
+    def get_created_order(self):
+        """4. GET /orders/<id> — fetch the order just created. Requires a token."""
+        if self.order_id is None or not self.user.access_token:
+            return
 
         with self.client.get(
-            f"/orders/{self.order_id}", name="/orders/[id]", catch_response=True
+            f"/orders/{self.order_id}",
+            name="/orders/[id]",
+            headers=self.auth_headers,
+            catch_response=True,
         ) as resp:
             if resp.status_code != 200:
                 resp.failure(f"GET /orders/{self.order_id} returned {resp.status_code}")
-            else:
-                resp.success()
+
+    @task
+    def maybe_refresh_token(self):
+        """5. POST /auth/refresh — rotate tokens on ~1 journey in 5."""
+        if not self.user.refresh_token or random.random() > 0.2:
+            return
+        self.user.refresh_access_token()
 
     @task
     def restart_journey(self):
@@ -134,3 +177,75 @@ class RevoShopUser(HttpUser):
 
     # Think time between journeys, so 200 users don't fire in lockstep.
     wait_time = between(1, 3)
+
+    def on_start(self):
+        """Authenticate once, before this user's first journey."""
+        self.access_token = None
+        self.refresh_token = None
+
+        if EXISTING_EMAIL and EXISTING_PASSWORD:
+            self.login(EXISTING_EMAIL, EXISTING_PASSWORD)
+            return
+
+        email, password = self.register()
+        if email:
+            self.login(email, password)
+
+    def register(self):
+        """Create a throwaway account. Returns (email, password) or (None, None)."""
+        suffix = uuid.uuid4().hex[:12]
+        email = f"locust_{suffix}@example.com"
+        body = {
+            "username": f"locust_{suffix}",
+            "email": email,
+            "password": GENERATED_PASSWORD,
+        }
+        with self.client.post(
+            "/users", json=body, name="/users (register)", catch_response=True
+        ) as resp:
+            if resp.status_code != 201:
+                resp.failure(f"POST /users returned {resp.status_code}")
+                return None, None
+        return email, GENERATED_PASSWORD
+
+    def login(self, email, password):
+        """Exchange credentials for a token pair and store both."""
+        with self.client.post(
+            "/auth/login",
+            json={"email": email, "password": password},
+            name="/auth/login",
+            catch_response=True,
+        ) as resp:
+            if resp.status_code != 200:
+                resp.failure(f"POST /auth/login returned {resp.status_code}")
+                return
+            body = resp.json()
+            self.access_token = body["access_token"]
+            self.refresh_token = body["refresh_token"]
+
+    def refresh_access_token(self):
+        """Rotate the token pair.
+
+        The refresh token presented is revoked server-side as part of this
+        call, so both halves of the new pair must be stored — keeping the old
+        refresh token would guarantee a `token_revoked` failure next time.
+        """
+        if not self.refresh_token:
+            return
+
+        with self.client.post(
+            "/auth/refresh",
+            headers={"Authorization": f"Bearer {self.refresh_token}"},
+            name="/auth/refresh",
+            catch_response=True,
+        ) as resp:
+            if resp.status_code != 200:
+                resp.failure(f"POST /auth/refresh returned {resp.status_code}")
+                # The session is over; stop sending authenticated requests
+                # rather than generating a stream of guaranteed 401s.
+                self.access_token = None
+                self.refresh_token = None
+                return
+            body = resp.json()
+            self.access_token = body["access_token"]
+            self.refresh_token = body["refresh_token"]
