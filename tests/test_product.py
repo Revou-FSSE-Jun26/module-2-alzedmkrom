@@ -45,7 +45,7 @@ def _attach_order(app, product_id, status="PENDING", quantity=1, unit_price=Deci
     and the test DB enforces it (see conftest.py's PRAGMA foreign_keys=ON)."""
     with app.app_context():
         user = User(username=f"buyer{product_id}", email=f"buyer{product_id}@example.com")
-        user.set_password("hunter2")
+        user.set_password("hunter2pass")
         db.session.add(user)
         db.session.flush()
 

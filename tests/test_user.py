@@ -8,7 +8,7 @@ rotation, logout, revocation, expiry) lives in test_auth.py.
 """
 
 
-def _register(client, username="alice", email="alice@example.com", password="hunter2", role=None):
+def _register(client, username="alice", email="alice@example.com", password="hunter2pass", role=None):
     body = {"username": username, "email": email, "password": password}
     if role is not None:
         body["role"] = role
@@ -106,9 +106,9 @@ def test_register_user_duplicate_username_error(client):
 
 
 def test_login_happy_path_returns_token_pair(client):
-    _register(client, email="alice@example.com", password="hunter2")
+    _register(client, email="alice@example.com", password="hunter2pass")
 
-    resp = client.post("/auth/login", json={"email": "alice@example.com", "password": "hunter2"})
+    resp = client.post("/auth/login", json={"email": "alice@example.com", "password": "hunter2pass"})
 
     assert resp.status_code == 200
     body = resp.get_json()
@@ -141,7 +141,7 @@ def test_login_non_string_credentials_error(client):
 
 
 def test_login_wrong_password_error(client):
-    _register(client, email="alice@example.com", password="hunter2")
+    _register(client, email="alice@example.com", password="hunter2pass")
 
     resp = client.post("/auth/login", json={"email": "alice@example.com", "password": "wrong"})
 
@@ -160,7 +160,7 @@ def test_login_unknown_email_error(client):
 
 def test_login_unknown_email_and_wrong_password_are_indistinguishable(client):
     """Neither response may reveal whether the account exists."""
-    _register(client, email="alice@example.com", password="hunter2")
+    _register(client, email="alice@example.com", password="hunter2pass")
 
     wrong_password = client.post(
         "/auth/login", json={"email": "alice@example.com", "password": "nope"}
@@ -174,9 +174,9 @@ def test_login_unknown_email_and_wrong_password_are_indistinguishable(client):
 
 
 def test_login_rejects_deactivated_account(client, make_user):
-    make_user(username="banned", email="banned@example.com", password="hunter2", is_active=False)
+    make_user(username="banned", email="banned@example.com", password="hunter2pass", is_active=False)
 
-    resp = client.post("/auth/login", json={"email": "banned@example.com", "password": "hunter2"})
+    resp = client.post("/auth/login", json={"email": "banned@example.com", "password": "hunter2pass"})
 
     assert resp.status_code == 401
     assert resp.get_json()["code"] == "account_inactive"
@@ -228,3 +228,134 @@ def test_get_user_unknown_id_is_forbidden_not_found_for_customer(customer_client
     resp = customer_client.get("/users/999")
 
     assert resp.status_code == 403
+
+
+# ---------------------------------------------------------------------------
+# Password policy on POST /users
+# ---------------------------------------------------------------------------
+#
+# The rule: at least 8 characters, at least one letter, at least one digit.
+# No uppercase character is required, but passwords stay case-sensitive.
+# Enforced on registration only — see `_password_policy_error` in routes.py
+# for why login must not re-check it.
+
+
+def test_register_rejects_password_under_minimum_length(client):
+    resp = _register(client, password="abc1234")  # 7 characters
+
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert body["code"] == "weak_password"
+    assert "8 characters" in body["message"]
+
+
+def test_register_accepts_password_at_exactly_minimum_length(client):
+    resp = _register(client, password="abcdefg1")  # 8 characters
+
+    assert resp.status_code == 201
+
+
+def test_register_rejects_password_without_a_digit(client):
+    resp = _register(client, password="onlyletters")
+
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert body["code"] == "weak_password"
+    assert "number" in body["message"]
+
+
+def test_register_rejects_password_without_a_letter(client):
+    resp = _register(client, password="12345678")
+
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert body["code"] == "weak_password"
+    assert "letter" in body["message"]
+
+
+def test_register_does_not_require_an_uppercase_letter(client):
+    resp = _register(client, password="alllowercase1")
+
+    assert resp.status_code == 201
+
+
+def test_register_allows_uppercase_and_symbols(client):
+    resp = _register(client, password="Passw0rd!#$")
+
+    assert resp.status_code == 201
+
+
+def test_register_rejects_whitespace_only_password(client):
+    resp = _register(client, password="        ")  # 8 spaces: long enough, no letter/digit
+
+    assert resp.status_code == 400
+
+
+def test_register_counts_length_on_the_raw_password(client):
+    """Spaces are real characters, so they count toward the minimum."""
+    resp = _register(client, password="  a1  ")  # 6 raw characters
+
+    assert resp.status_code == 400
+    assert "8 characters" in resp.get_json()["message"]
+
+
+def test_register_reports_only_the_rule_that_failed(client):
+    """A short password is not also lectured about digits it already has."""
+    resp = _register(client, password="abc1")
+
+    message = resp.get_json()["message"]
+    assert "8 characters" in message
+    assert "number" not in message
+
+
+def test_register_error_precedence_blank_before_policy(client):
+    """An empty password is 'cannot be empty', not 'too short'."""
+    resp = _register(client, password="")
+
+    assert resp.status_code == 400
+    assert "empty" in resp.get_json()["message"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Passwords are case-sensitive
+# ---------------------------------------------------------------------------
+
+
+def test_password_is_case_sensitive_on_login(client):
+    """No uppercase is *required*, but case still has to match exactly."""
+    _register(client, email="case@example.com", password="Secret123")
+
+    wrong_case = client.post(
+        "/auth/login", json={"email": "case@example.com", "password": "secret123"}
+    )
+    assert wrong_case.status_code == 401
+    assert wrong_case.get_json()["code"] == "invalid_credentials"
+
+    exact = client.post(
+        "/auth/login", json={"email": "case@example.com", "password": "Secret123"}
+    )
+    assert exact.status_code == 200
+
+
+def test_password_case_variants_are_distinct_accounts(client):
+    """Two accounts may hold passwords differing only in case."""
+    _register(client, username="lower", email="lower@example.com", password="secret123")
+    _register(client, username="upper", email="upper@example.com", password="SECRET123")
+
+    assert client.post(
+        "/auth/login", json={"email": "lower@example.com", "password": "secret123"}
+    ).status_code == 200
+    assert client.post(
+        "/auth/login", json={"email": "upper@example.com", "password": "secret123"}
+    ).status_code == 401
+
+
+def test_login_does_not_enforce_the_password_policy(client, make_user):
+    """An account whose password predates the policy can still log in."""
+    make_user(username="legacy", email="legacy@example.com", password="old")
+
+    resp = client.post(
+        "/auth/login", json={"email": "legacy@example.com", "password": "old"}
+    )
+
+    assert resp.status_code == 200

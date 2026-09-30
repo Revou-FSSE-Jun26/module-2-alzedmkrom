@@ -20,6 +20,7 @@ _DEFAULT_MESSAGES = {
     400: "The request could not be understood. A valid JSON body is required.",
     404: "The requested resource was not found.",
     405: "The HTTP method is not allowed for this URL.",
+    429: "Too many requests. Please slow down and try again shortly.",
     500: "An internal error occurred. Please try again later.",
 }
 
@@ -27,6 +28,7 @@ _DEFAULT_NAMES = {
     400: "Bad Request",
     404: "Not Found",
     405: "Method Not Allowed",
+    429: "Too Many Requests",
     500: "Internal Server Error",
 }
 
@@ -79,6 +81,44 @@ def not_found(error):
 def method_not_allowed(error):
     """Known URL, wrong HTTP method."""
     return _json_error(error, 405)
+
+
+@app.errorhandler(429)
+def too_many_requests(error):
+    """A rate limit was exceeded (see the limiter in extensions.py).
+
+    Carries a machine-readable ``code`` like the auth failures in ``auth.py``,
+    so a client can tell "you are going too fast, back off" apart from "your
+    credentials are wrong" — both of which a naive client would otherwise see
+    only as "login did not work".
+
+    Werkzeug already puts ``Retry-After`` on the response it built for this
+    exception, so that header is copied across rather than recomputed; without
+    it a client has no way to know how long to wait beyond guessing.
+    """
+    payload = {
+        "error": _DEFAULT_NAMES[429],
+        "message": _DEFAULT_MESSAGES[429],
+        "code": "rate_limit_exceeded",
+    }
+
+    # Flask-Limiter puts the limit that tripped (e.g. "10 per 1 minute") in the
+    # exception description. Surfaced as a separate field so the generic
+    # message stays stable for clients matching on it.
+    description = getattr(error, "description", None)
+    if description:
+        payload["limit"] = str(description)
+
+    response = jsonify(payload)
+    response.status_code = 429
+
+    original = getattr(error, "get_response", None)
+    if callable(original):
+        retry_after = original().headers.get("Retry-After")
+        if retry_after:
+            response.headers["Retry-After"] = retry_after
+
+    return response
 
 
 @app.errorhandler(500)

@@ -4,13 +4,13 @@ token lifecycle behaviours those depend on.
 Covers the parts that are easy to get subtly wrong and impossible to see from
 a happy-path login:
 
-  * **rotation** — refreshing invalidates the refresh token just used, so a
+  * **rotation** â€” refreshing invalidates the refresh token just used, so a
     replayed one is refused
-  * **revocation** — logout really does stop a token that has not expired yet
-  * **expiry** — an expired *access* token is recoverable (refresh and retry),
+  * **revocation** â€” logout really does stop a token that has not expired yet
+  * **expiry** â€” an expired *access* token is recoverable (refresh and retry),
     an expired *refresh* token is the session ending, and the two are
     distinguishable by the response alone
-  * **account state** — deactivating an account immediately invalidates tokens
+  * **account state** â€” deactivating an account immediately invalidates tokens
     already issued to it
 
 Token lifetimes here are forced per-test with `expires_delta` rather than by
@@ -26,7 +26,7 @@ from extensions import db
 from models import TokenBlocklist, User
 
 
-def _login(client, email, password="hunter2"):
+def _login(client, email, password="hunter2pass"):
     """Register nothing; log in an existing account and return the body."""
     resp = client.post("/auth/login", json={"email": email, "password": password})
     assert resp.status_code == 200, resp.get_json()
@@ -40,7 +40,7 @@ def _bearer(token):
 @pytest.fixture()
 def tokens(client, make_user):
     """A real login, returning the token pair plus the account's id."""
-    user_id = make_user(username="alice", email="alice@example.com", password="hunter2")
+    user_id = make_user(username="alice", email="alice@example.com", password="hunter2pass")
     body = _login(client, "alice@example.com")
     return {
         "user_id": user_id,
@@ -211,8 +211,8 @@ def test_logout_ignores_a_malformed_refresh_token(client, tokens):
 
 
 def test_logout_cannot_revoke_another_users_refresh_token(client, make_user, app):
-    victim_id = make_user(username="victim", email="victim@example.com", password="hunter2")
-    attacker_id = make_user(username="attacker", email="attacker@example.com", password="hunter2")
+    victim_id = make_user(username="victim", email="victim@example.com", password="hunter2pass")
+    attacker_id = make_user(username="attacker", email="attacker@example.com", password="hunter2pass")
 
     victim = _login(client, "victim@example.com")
     attacker = _login(client, "attacker@example.com")
@@ -301,7 +301,7 @@ def test_expired_access_token_can_be_replaced_via_refresh(client, app, tokens):
 # its own session: its commit reaches the database, but the outer session
 # keeps returning the copy it already has in its identity map, and the change
 # appears not to have happened. Writing through the same session the request
-# will use avoids that, and still exercises what these tests are about —
+# will use avoids that, and still exercises what these tests are about â€”
 # `auth._user_lookup` re-reading the account on every request instead of
 # trusting what the token says.
 

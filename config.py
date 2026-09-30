@@ -29,6 +29,22 @@ def _positive_int_env(name: str, default: int) -> int:
     return value if value > 0 else default
 
 
+def _non_negative_int_env(name: str, default: int) -> int:
+    """Read `name` as an integer of zero or more, falling back to `default`.
+
+    Separate from `_positive_int_env` because zero is a meaningful value for
+    some settings (no trusted proxies) rather than a mistake.
+    """
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value >= 0 else default
+
+
 class Config:
     """Configuration loaded with app.config.from_object(Config).
 
@@ -127,3 +143,90 @@ class Config:
     # writes, order status changes). Compared case-insensitively against
     # `users.role`, whose server default is 'CUSTOMER'.
     ADMIN_ROLE = os.environ.get("ADMIN_ROLE", "ADMIN").strip() or "ADMIN"
+
+    # -- Password policy ----------------------------------------------------
+    # Enforced by `POST /users` only (see `_password_policy_error` in
+    # routes.py). Login deliberately does not re-check the policy: accounts
+    # created before it existed would otherwise be locked out of their own
+    # working passwords.
+    #
+    # The rule is length plus "at least one letter and one digit". Case is
+    # not part of the rule — no uppercase character is required — but
+    # passwords remain fully case-sensitive, because Werkzeug hashes the
+    # exact bytes it is given and compares hashes, never the text.
+    PASSWORD_MIN_LENGTH = _positive_int_env("PASSWORD_MIN_LENGTH", 8)
+
+    # -- Rate limiting ------------------------------------------------------
+    # Keys below starting with RATELIMIT_ are read by Flask-Limiter itself.
+    #
+    # This matters because authorization is only as strong as the front door:
+    # every role check in auth.py is bypassed by simply guessing an admin's
+    # password, and without a limit that can be attempted as fast as the
+    # network allows.
+    # Pinned True, which is not the on/off switch it looks like. Flask-Limiter
+    # reads this particular key itself while initialising and, when it is
+    # false, skips setting up its storage backend — leaving a limiter that
+    # cannot be switched on again afterwards. Since the test suite runs with
+    # limits off and enables them for the tests that are about limits, storage
+    # has to exist either way.
+    #
+    # The real state is `RATE_LIMITING_ACTIVE` below, which extensions.py
+    # applies to `limiter.enabled` once the storage is up.
+    RATELIMIT_ENABLED = True
+
+    # The actual switch, still driven by a `RATELIMIT_ENABLED` environment
+    # variable so there is only one name to remember from the outside.
+    # Set `RATELIMIT_ENABLED=false` to turn limits off — necessary for load
+    # testing, where hundreds of simulated users share one IP and would
+    # otherwise all be throttled as a single abusive client.
+    RATE_LIMITING_ACTIVE = (
+        os.environ.get("RATELIMIT_ENABLED", "true").strip().lower() != "false"
+    )
+
+    # Where the counters live. The default keeps them in the worker's own
+    # memory, which has two consequences worth knowing rather than
+    # discovering: gunicorn runs several workers, each with its own counter,
+    # so the effective limit is roughly the configured one times the worker
+    # count; and a restart or redeploy resets every counter. That is a weaker
+    # guarantee than it looks, but still turns unlimited guessing into a slow
+    # trickle. Point this at a shared store to make the limits exact, e.g.
+    #   RATELIMIT_STORAGE_URI=redis://default:password@host:6379
+    RATELIMIT_STORAGE_URI = os.environ.get("RATELIMIT_STORAGE_URI", "memory://").strip()
+
+    # Send X-RateLimit-* headers so a client can see its own budget instead of
+    # having to infer it from a 429.
+    RATELIMIT_HEADERS_ENABLED = True
+
+    # Applies to every route without its own decorator. Generous: it is a
+    # backstop against a runaway client, not the anti-brute-force measure.
+    RATELIMIT_DEFAULT = os.environ.get("RATELIMIT_DEFAULT", "300 per minute").strip()
+
+    # Credential guessing. Deliberately the tightest limit in the app: a
+    # person mistyping their password needs a handful of tries, while an
+    # attacker needs millions.
+    RATELIMIT_LOGIN = os.environ.get(
+        "RATELIMIT_LOGIN", "10 per minute;100 per hour"
+    ).strip()
+
+    # Account creation, to stop a script filling the users table.
+    RATELIMIT_REGISTER = os.environ.get(
+        "RATELIMIT_REGISTER", "5 per minute;30 per hour"
+    ).strip()
+
+    # Token rotation. Looser, since a legitimate client refreshes roughly once
+    # per access-token lifetime, but bounded because each call writes a
+    # token_blocklist row.
+    RATELIMIT_REFRESH = os.environ.get("RATELIMIT_REFRESH", "60 per minute").strip()
+
+    # Number of proxies in front of the app whose X-Forwarded-For entries can
+    # be trusted, used to recover the real client IP (see extensions.py).
+    #
+    # This has to be right or rate limiting misfires in one of two ways. Too
+    # low on a deployed app and every request appears to come from the
+    # platform's proxy, so one user's failed logins throttle everybody. Too
+    # high and a client can prepend a forged X-Forwarded-For entry to get a
+    # fresh quota per request, which defeats the limit entirely.
+    #
+    # Default 1 matches a single platform proxy such as Railway's. Set it to 0
+    # when running with no proxy at all, so the header is ignored.
+    TRUSTED_PROXY_COUNT = _non_negative_int_env("TRUSTED_PROXY_COUNT", 1)

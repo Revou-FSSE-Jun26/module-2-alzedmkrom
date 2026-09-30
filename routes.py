@@ -27,7 +27,7 @@ from auth import (
     revoke_current_token,
     revoke_token,
 )
-from extensions import db
+from extensions import db, limiter
 from models import Category, Order, Product, User, order_items
 
 home_bp = Blueprint("home", __name__)
@@ -62,6 +62,7 @@ def index():
 # ---------------------------------------------------------------------------
 
 @users_bp.route("/users", methods=["POST"])
+@limiter.limit(lambda: current_app.config["RATELIMIT_REGISTER"])
 @jwt_required(optional=True)
 def register_user():
     """Create a new user account.
@@ -73,8 +74,10 @@ def register_user():
          400 naming `username`.
       3. Require a non-empty `email`; a missing or blank value returns 400
          naming `email`.
-      4. Require a non-empty `password`; a missing or blank value returns
-         400 naming `password`.
+      4. Require a non-empty `password` that satisfies
+         `_password_policy_error` (minimum length, at least one letter, at
+         least one digit); a missing, blank, or weak value returns 400, the
+         last with `"code": "weak_password"`.
       5. `role` is **only honored for an authenticated admin caller**. See
          the note below.
       6. Case-insensitive duplicate pre-check on `username`/`email`; a match
@@ -156,6 +159,19 @@ def register_user():
                 {
                     "error": "Bad Request",
                     "message": "Password cannot be empty.",
+                }
+            ),
+            400,
+        )
+
+    policy_error = _password_policy_error(password)
+    if policy_error is not None:
+        return (
+            jsonify(
+                {
+                    "error": "Bad Request",
+                    "message": policy_error,
+                    "code": "weak_password",
                 }
             ),
             400,
@@ -284,8 +300,15 @@ def _issue_tokens(user):
 
 
 @users_bp.route("/auth/login", methods=["POST"])
+@limiter.limit(lambda: current_app.config["RATELIMIT_LOGIN"])
 def login():
     """Exchange email and password for an access/refresh token pair.
+
+    Rate limited more tightly than anything else in the app, because this is
+    the one endpoint where an attacker needs no credentials to start: every
+    role check elsewhere is moot once someone has guessed an admin's password.
+    Exceeding the limit returns 429 with `"code": "rate_limit_exceeded"` and a
+    `Retry-After` header.
 
     Response body:
       {
@@ -373,6 +396,7 @@ def login():
 
 
 @users_bp.route("/auth/refresh", methods=["POST"])
+@limiter.limit(lambda: current_app.config["RATELIMIT_REFRESH"])
 @jwt_required(refresh=True)
 def refresh():
     """Trade a valid refresh token for a new access/refresh pair.
@@ -520,6 +544,44 @@ def get_user(user_id):
         )
 
     return jsonify(user.to_dict())
+
+
+def _password_policy_error(password):
+    """Return why `password` is unacceptable, or None if it passes.
+
+    The rule is a minimum length (`PASSWORD_MIN_LENGTH`, default 8) plus at
+    least one letter and at least one digit. No uppercase character is
+    required.
+
+    Two deliberate choices:
+
+    * **Length is measured on the raw string**, not a stripped one, because a
+      space is a perfectly good password character and silently not counting
+      it would make the limit a lie. An all-whitespace password still fails,
+      on the letter and digit rules.
+    * **Case is not part of the rule, but passwords stay case-sensitive.**
+      Nothing here lowercases anything, and `User.set_password` hands the
+      exact string to Werkzeug, which hashes those bytes. `check_password`
+      then compares hashes, so `secret1` and `Secret1` are different
+      passwords.
+
+    Each failure names the one rule that was broken rather than reciting the
+    whole policy, so a caller fixing a short password is not also told about
+    digits it already has.
+
+    Applied by `register_user` only. Login must never call this: accounts
+    created before the policy existed have working passwords that would not
+    satisfy it, and re-checking at login would lock them out of their own
+    accounts rather than prompting anyone to choose a better one.
+    """
+    minimum = current_app.config["PASSWORD_MIN_LENGTH"]
+    if len(password) < minimum:
+        return f"Password must be at least {minimum} characters long."
+    if not any(character.isalpha() for character in password):
+        return "Password must contain at least one letter."
+    if not any(character.isdigit() for character in password):
+        return "Password must contain at least one number."
+    return None
 
 
 _PRODUCT_REQUIRED_FIELDS = ("category_id", "name", "price", "stock_quantity")

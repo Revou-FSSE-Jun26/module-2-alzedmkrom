@@ -42,14 +42,31 @@ os.environ["DATABASE_URL"] = f"sqlite:///{_TEST_DB_PATH}"
 os.environ["SECRET_KEY"] = "test-secret-key-that-is-long-enough-for-hs256"
 os.environ["FLASK_DEBUG"] = "false"
 
+# Rate limiting off for the suite as a whole. The limiter's counters live in
+# the process, not in the per-test database, so they would carry over from one
+# test to the next and start returning 429 to tests that are only trying to
+# register a couple of accounts. The `rate_limited` fixture below turns it back
+# on, with a clean slate, for the tests that are specifically about limits.
+os.environ["RATELIMIT_ENABLED"] = "false"
+
+# No proxy in front of the test client, so X-Forwarded-For must not be
+# trusted — see the ProxyFix note in extensions.py.
+os.environ["TRUSTED_PROXY_COUNT"] = "0"
+
 # Importing `app` (the entry point, not `extensions`) is what registers the
 # blueprints, the error handlers, and the JWT callbacks, matching how the real
 # server starts up.
 import app as _app_entry  # noqa: E402,F401
 from flask_jwt_extended import create_access_token, create_refresh_token  # noqa: E402
 
-from extensions import app as flask_app, db  # noqa: E402
+from extensions import app as flask_app, db, limiter  # noqa: E402
 from models import Category, User  # noqa: E402,F401
+
+# Password used by the fixtures below. Satisfies the policy enforced by
+# `POST /users` (at least 8 characters, with a letter and a digit), so a test
+# registering through the real endpoint is not rejected before it gets to
+# whatever it actually meant to check.
+TEST_PASSWORD = "hunter2pass"
 
 # SQLite ignores foreign-key constraints (including ON DELETE RESTRICT)
 # unless this pragma is set per-connection. schema.sql's RESTRICT
@@ -108,7 +125,7 @@ def make_user(app):
     def _make(
         username="someone",
         email=None,
-        password="hunter2",
+        password=TEST_PASSWORD,
         role="CUSTOMER",
         is_active=True,
     ):
@@ -178,6 +195,21 @@ def authorized_client_for(app):
         return _authorized_client(app, user_id, refresh=refresh)
 
     return _for
+
+
+@pytest.fixture()
+def rate_limited(app):
+    """Turn rate limiting on for one test, starting from empty counters.
+
+    Off for the rest of the suite (see the env block at the top of this file).
+    Counters are reset on the way in *and* out, so neither this test's
+    requests nor a previous one's can leak across the boundary.
+    """
+    limiter.reset()
+    limiter.enabled = True
+    yield limiter
+    limiter.enabled = False
+    limiter.reset()
 
 
 @pytest.fixture(scope="session", autouse=True)

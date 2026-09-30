@@ -51,6 +51,15 @@ which `POST /orders` starts failing on insufficient stock.
 Point the server at a throwaway database before running this, not at data you
 care about. See `.env.example` for how to set `DATABASE_URL` for a load-test
 database before starting `flask run`.
+
+ALSO REQUIRED — turn rate limiting off on the server:
+
+    $env:RATELIMIT_ENABLED="false"   # PowerShell, before `flask run`
+
+Every simulated user comes from the same IP, so to the limiter they are one
+client making hundreds of requests a second. Leave limits on and the run
+measures nothing but 429s: registration caps out after a handful of users, and
+the rest of the journey never gets a token.
 """
 
 import os

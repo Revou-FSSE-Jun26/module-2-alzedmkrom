@@ -33,6 +33,8 @@ RevoShop is the backend for a small online store. It manages a catalog of **prod
 - **Immediate logout via database-backed revocation** — revoked tokens are recorded in `token_blocklist` and refused for the rest of their lifetime, rather than staying valid until they expire. Stored in the database, not in memory, so revocation holds across gunicorn workers and redeploys.
 - **Role-based authorization** — catalog reads are public, orders are scoped to the authenticated user, and product/category writes plus order status changes are admin-only. Roles are re-read from the database per request, so a demotion or deactivation takes effect immediately instead of when the token expires. `POST /users` refuses to honor a self-assigned `role`.
 - **CORS** — an explicit, environment-configured origin allowlist, so a browser frontend on another origin can call the API.
+- **Password policy** — registration requires at least 8 characters including a letter and a digit. Case is not mandated but is preserved, so passwords stay case-sensitive. Enforced at sign-up only, so older accounts are not locked out.
+- **Rate limiting** — per-IP caps, tightest on `POST /auth/login`, which is what makes password guessing impractical. Exceeding one returns a JSON `429` with `Retry-After`, and `X-RateLimit-*` headers report the remaining budget.
 - **Many-to-many between orders and products through `order_items`** — each order line stores its own `quantity` and the `unit_price` captured at order time, so an order is a faithful record of what was actually charged. `flask link-order-products` demonstrates one order linked to multiple products.
 - **Data validation** — every write endpoint validates required fields, types, ranges, and lengths, returning `400`/`422` with a clear message on bad input, and `409` on conflicts (duplicate category/user, delete blocked by references).
 - **Error handling with `try`/`except`** — all database writes are wrapped so an `IntegrityError` maps to `409` and any other `SQLAlchemyError` rolls back and maps to `500`, with the internal detail logged (never leaked). Framework 404/405 responses are also returned as JSON.
@@ -49,6 +51,7 @@ RevoShop is the backend for a small online store. It manages a catalog of **prod
 - **Flask-Migrate** (Alembic) — version-controlled schema migrations.
 - **Flask-JWT-Extended** — access/refresh token issuing, verification, and the revocation hook.
 - **Flask-Cors** — cross-origin access for the browser frontend.
+- **Flask-Limiter** — per-IP request limits on the authentication endpoints.
 - **PostgreSQL** — the relational database (`revoshop_db`).
 - **pgAdmin** — GUI for inspecting the local database and tables.
 - **pytest** — the automated test suite.
@@ -60,11 +63,11 @@ RevoShop is the backend for a small online store. It manages a catalog of **prod
 ## Project Files
 
 - `schema.sql`, `seed.sql`, `queries.sql` — Checkpoint 1 database design, sample data, and verification queries. Unchanged by this checkpoint.
-- `config.py` — the `Config` class (database URIs, `SECRET_KEY`, CORS origins, JWT lifetimes, admin role name).
-- `extensions.py` — the module-level `app`, `db = SQLAlchemy(app)`, `migrate = Migrate(app, db)`, `cors`, and `jwt = JWTManager(app)`.
+- `config.py` — the `Config` class (database URIs, `SECRET_KEY`, CORS origins, JWT lifetimes, admin role name, password policy, rate limits).
+- `extensions.py` — the module-level `app`, `db = SQLAlchemy(app)`, `migrate = Migrate(app, db)`, `cors`, `jwt = JWTManager(app)`, and `limiter` (plus the `ProxyFix` that recovers the real client IP behind a platform proxy).
 - `models.py` — `User`, `Category`, `Product`, `Order`, `TokenBlocklist`, and the `order_items` association table.
 - `routes.py` — `home_bp`, `products_bp`, `categories_bp`, `orders_bp`, and `users_bp` (which also carries the `/auth/*` endpoints), all database-backed.
-- `errors.py` — JSON error handlers for 400/404/405/500.
+- `errors.py` — JSON error handlers for 400/404/405/429/500.
 - `auth.py` — the JWT callbacks (identity, user lookup, revocation check, JSON failure responses) and the `admin_required` / owner-or-admin guards used by `routes.py`.
 - `cli.py` — `flask check-db` and `flask link-order-products`.
 - `locustfile.py` — Locust load test simulating a shopper journey (list products, view one, place an order, view that order).
@@ -311,7 +314,7 @@ Errors carry a machine-readable `code`, and an expiry also echoes which token ex
   "code": "token_expired", "token_type": "refresh" }
 ```
 
-Full set of codes: `authorization_required`, `token_expired`, `token_revoked`, `token_invalid`, `user_unavailable`, `admin_required`, `forbidden`, `invalid_credentials`, `account_inactive`, `fresh_token_required`.
+Full set of codes: `authorization_required`, `token_expired`, `token_revoked`, `token_invalid`, `user_unavailable`, `admin_required`, `forbidden`, `invalid_credentials`, `account_inactive`, `fresh_token_required`, `weak_password`, `rate_limit_exceeded`.
 
 ### Suggested frontend flow
 
@@ -320,6 +323,59 @@ Full set of codes: `authorization_required`, `token_expired`, `token_revoked`, `
 3. On a 401 with `code = "token_expired"` and `token_type = "access"`: call `/auth/refresh`, replace **both** tokens, replay the original request once.
 4. On any other 401 (including a `token_expired` refresh, or `token_revoked`): discard both tokens and redirect to login.
 5. On logout, call `/auth/logout` with the refresh token in the body before clearing local state.
+
+### Password policy
+
+`POST /users` requires a password that is:
+
+- at least **8 characters** (`PASSWORD_MIN_LENGTH`)
+- containing at least **one letter**
+- containing at least **one digit**
+
+No uppercase character is required. Passwords are nonetheless **fully case-sensitive**: nothing is lowercased anywhere, `User.set_password` hands the exact string to Werkzeug, and verification compares hashes rather than text, so `secret1` and `Secret1` are different passwords.
+
+A rejection names the single rule that failed, with `"code": "weak_password"`:
+
+```json
+{ "error": "Bad Request",
+  "message": "Password must be at least 8 characters long.",
+  "code": "weak_password" }
+```
+
+Length is counted on the raw string, since a space is a legitimate password character. Whitespace-only passwords still fail, on the letter and digit rules.
+
+**Login never re-checks the policy.** Accounts created before it existed have working passwords that would not satisfy it, and re-checking at sign-in would lock them out of their own accounts rather than prompting anyone to pick something better.
+
+### Rate limiting
+
+Requests are capped per client IP. This is the companion to the password policy rather than a capacity control: every role check above is bypassed by guessing an admin's password, and guessing is only expensive when attempts are capped.
+
+| Endpoint | Default limit | Why |
+| --- | --- | --- |
+| `POST /auth/login` | 10/min, 100/hour | Tightest in the app: no credentials needed to start guessing. |
+| `POST /users` | 5/min, 30/hour | Stops a script filling the users table. |
+| `POST /auth/refresh` | 60/min | A real client refreshes rarely, and each call writes a `token_blocklist` row. |
+| everything else | 300/min | Backstop against a runaway client; browsing stays comfortable. |
+
+Exceeding a limit returns `429` in the usual envelope, with `Retry-After` and the limit that tripped. Every response also carries `X-RateLimit-*` headers, so a client can watch its own budget instead of inferring it from a rejection.
+
+```json
+{ "error": "Too Many Requests",
+  "message": "Too many requests. Please slow down and try again shortly.",
+  "code": "rate_limit_exceeded",
+  "limit": "10 per 1 minute" }
+```
+
+Two behaviours worth knowing:
+
+- **Failed attempts count**, and once the limit trips even the *correct* password is refused until the window passes. Otherwise an attacker's final successful guess would still be rewarded.
+- `429` and `401` are distinguishable by `code`, so a frontend can say "too many attempts, wait a moment" rather than "wrong password" for something that is not a password problem.
+
+**Honest limitations of the default setup.** Counters live in each worker's memory (`RATELIMIT_STORAGE_URI=memory://`), which means gunicorn's several workers each keep their own, so the effective limit is roughly the configured one times the worker count; and a restart or redeploy clears them. That is weaker than it looks, though it still turns unlimited guessing into a trickle. Point `RATELIMIT_STORAGE_URI` at Redis to make the limits exact.
+
+`TRUSTED_PROXY_COUNT` must match the deployment or limiting misfires: too low and every request appears to come from the platform proxy, so one user's failed logins throttle everybody; too high and a client can forge an `X-Forwarded-For` entry for a fresh quota per request. `1` is correct behind Railway; use `0` with no proxy.
+
+**Load testing requires `RATELIMIT_ENABLED=false`** on the server, since all of Locust's simulated users share one IP and would otherwise be throttled as a single abusive client.
 
 ### Roles
 
@@ -876,14 +932,20 @@ Response — `200 OK`:
 
 ### POST /users
 
-Creates a new user account. Validates the body, checks for a case-insensitive duplicate on `username`/`email`, hashes the password with Werkzeug, and persists the row. An optional `role` (string, 50 chars or fewer) may be supplied; if omitted it defaults to `CUSTOMER`.
+Creates a new user account. Public: no token required. Validates the body, checks for a case-insensitive duplicate on `username`/`email`, hashes the password with Werkzeug, and persists the row.
+
+The password must satisfy the [password policy](#password-policy): at least 8 characters, with a letter and a digit.
+
+An optional `role` is **ignored unless the request carries an admin token** — see [Roles](#roles). An ordinary sign-up always produces a `CUSTOMER`, even if it sends something else.
+
+Rate limited to 5 per minute and 30 per hour per IP.
 
 Request (success):
 
 ```sh
 curl -X POST http://127.0.0.1:5000/users \
   -H "Content-Type: application/json" \
-  -d '{"username": "newshopper", "email": "newshopper@example.com", "password": "a-strong-password"}'
+  -d '{"username": "newshopper", "email": "newshopper@example.com", "password": "shopper2026"}'
 ```
 
 Response — `201 Created` (no `password_hash` in the body):
@@ -913,6 +975,24 @@ Response — `400 Bad Request`:
 {
   "error": "Bad Request",
   "message": "Username cannot be empty."
+}
+```
+
+Request (password too weak):
+
+```sh
+curl -X POST http://127.0.0.1:5000/users \
+  -H "Content-Type: application/json" \
+  -d '{"username": "newshopper", "email": "newshopper@example.com", "password": "letters"}'
+```
+
+Response — `400 Bad Request`, naming the one rule that failed:
+
+```json
+{
+  "error": "Bad Request",
+  "message": "Password must be at least 8 characters long.",
+  "code": "weak_password"
 }
 ```
 
@@ -1165,11 +1245,12 @@ An expired access token on `POST /orders` is the one failure treated as recovera
 
 The Flask server must already be running (`flask run` or `python app.py`) before starting Locust; `locustfile.py` sends real HTTP requests to it, it does not import or call the app in-process.
 
-**Use a dedicated test database** so Locust orders and stock changes never touch your main `revoshop_db` data. Point `DATABASE_URL` at `revoshop_test` before starting the server (see `.env.example` for one-time setup instructions):
+**Use a dedicated test database** so Locust orders and stock changes never touch your main `revoshop_db` data, and **turn rate limiting off**, since all the simulated users share one IP and the limiter would otherwise treat them as a single abusive client — registration would cap out after a handful of users and the rest of the journey would never get a token. Set both before starting the server (see `.env.example` for one-time database setup):
 
 ```powershell
-# PowerShell — override DATABASE_URL for this terminal session only
+# PowerShell — overrides apply to this terminal session only
 $env:DATABASE_URL="postgresql://postgres:your_password@localhost/revoshop_test"
+$env:RATELIMIT_ENABLED="false"
 flask run
 ```
 
