@@ -28,7 +28,7 @@ from auth import (
     revoke_token,
 )
 from extensions import db, limiter
-from models import Category, Order, Product, User, order_items
+from models import Category, Order, Product, User, normalize_password, order_items
 
 home_bp = Blueprint("home", __name__)
 users_bp = Blueprint("users", __name__)
@@ -549,21 +549,23 @@ def get_user(user_id):
 def _password_policy_error(password):
     """Return why `password` is unacceptable, or None if it passes.
 
-    The rule is a minimum length (`PASSWORD_MIN_LENGTH`, default 8) plus at
-    least one letter and at least one digit. No uppercase character is
-    required.
+    The rule is a length between `PASSWORD_MIN_LENGTH` (default 8) and
+    `PASSWORD_MAX_LENGTH` (default 255), plus at least one letter and at least
+    one digit. No uppercase character is required.
 
-    Two deliberate choices:
+    Three deliberate choices:
 
-    * **Length is measured on the raw string**, not a stripped one, because a
-      space is a perfectly good password character and silently not counting
-      it would make the limit a lie. An all-whitespace password still fails,
-      on the letter and digit rules.
+    * **Everything is measured on the Unicode-normalised password**, which is
+      what actually gets hashed. Validating the raw input instead would let
+      the two encodings of the same visible password disagree about whether
+      they satisfy the rules.
+    * **Length is not measured on a stripped string**, because a space is a
+      perfectly good password character and silently not counting it would
+      make the limit a lie. An all-whitespace password still fails, on the
+      letter and digit rules.
     * **Case is not part of the rule, but passwords stay case-sensitive.**
-      Nothing here lowercases anything, and `User.set_password` hands the
-      exact string to Werkzeug, which hashes those bytes. `check_password`
-      then compares hashes, so `secret1` and `Secret1` are different
-      passwords.
+      Nothing here lowercases anything, and normalisation does not fold case,
+      so `secret1` and `Secret1` remain different passwords.
 
     Each failure names the one rule that was broken rather than reciting the
     whole policy, so a caller fixing a short password is not also told about
@@ -574,9 +576,17 @@ def _password_policy_error(password):
     satisfy it, and re-checking at login would lock them out of their own
     accounts rather than prompting anyone to choose a better one.
     """
+    # Checked against the normalised form, because that is the string
+    # `set_password` will hash. Measuring the raw input instead would let a
+    # decomposed password fail a length rule that its stored form satisfies.
+    password = normalize_password(password)
+
     minimum = current_app.config["PASSWORD_MIN_LENGTH"]
+    maximum = current_app.config["PASSWORD_MAX_LENGTH"]
     if len(password) < minimum:
         return f"Password must be at least {minimum} characters long."
+    if len(password) > maximum:
+        return f"Password must be {maximum} characters or fewer."
     if not any(character.isalpha() for character in password):
         return "Password must contain at least one letter."
     if not any(character.isdigit() for character in password):

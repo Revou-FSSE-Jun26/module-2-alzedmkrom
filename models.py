@@ -9,10 +9,40 @@ numeric precision, constraint name, and index name here is written to match
 without a string lookup.
 """
 
+import unicodedata
+
 from sqlalchemy import func, text
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from extensions import db
+
+
+def normalize_password(raw_password: str) -> str:
+    """Return `raw_password` in Unicode NFKC form, ready to be hashed.
+
+    Without this, a password containing any non-ASCII character can lock its
+    own owner out. The same visible character often has more than one valid
+    encoding — ``é`` is either one code point (U+00E9) or two (``e`` plus a
+    combining acute) — and the two spell the same word on screen while being
+    different strings underneath. Hash one and compare the other and
+    verification fails, so whether login works comes down to which keyboard,
+    operating system, or paste buffer the password happened to arrive through.
+    Nothing in the response could explain that to the user.
+
+    Normalising both on the way in and on the way out removes the ambiguity;
+    it is what NIST SP 800-63B asks for when Unicode is accepted in memorized
+    secrets (NFKC or NFKD — NFKC is used here, being the composed form).
+
+    NFKC also applies compatibility folding, which is worth knowing about
+    because it is mildly lossy: ``²`` becomes ``2`` and full-width ``ｐ``
+    becomes ``p``, so two passwords that look different can normalise to the
+    same string. That is the intended trade — a slightly smaller password
+    space in exchange for a password that keeps working wherever it is typed.
+
+    Applies to every path that sets or checks a password, which is why it
+    lives here next to them rather than in the route.
+    """
+    return unicodedata.normalize("NFKC", raw_password)
 
 # ---------------------------------------------------------------------------
 # Association table: orders <-> products (many-to-many with payload columns)
@@ -91,13 +121,22 @@ class User(db.Model):
     def set_password(self, raw_password: str) -> None:
         """Hash ``raw_password`` with Werkzeug and store it on ``password_hash``.
 
-        No plaintext password is ever stored (Requirement 5.2).
+        No plaintext password is ever stored (Requirement 5.2). The password is
+        Unicode-normalised first — see ``normalize_password`` — so that it can
+        be verified later regardless of how the same characters get encoded on
+        the way in.
         """
-        self.password_hash = generate_password_hash(raw_password)
+        self.password_hash = generate_password_hash(normalize_password(raw_password))
 
     def check_password(self, raw_password: str) -> bool:
-        """Verify ``raw_password`` against the stored hash."""
-        return check_password_hash(self.password_hash, raw_password)
+        """Verify ``raw_password`` against the stored hash.
+
+        Normalises exactly as ``set_password`` does; the two have to agree or
+        non-ASCII passwords would verify only by luck.
+        """
+        return check_password_hash(
+            self.password_hash, normalize_password(raw_password)
+        )
 
     def to_dict(self) -> dict:
         """Serialize the user, omitting ``password_hash`` entirely.

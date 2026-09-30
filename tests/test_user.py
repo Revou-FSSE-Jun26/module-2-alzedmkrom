@@ -359,3 +359,140 @@ def test_login_does_not_enforce_the_password_policy(client, make_user):
     )
 
     assert resp.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Unicode normalisation
+# ---------------------------------------------------------------------------
+#
+# The same visible password can arrive encoded more than one way depending on
+# keyboard, OS, or paste buffer. Without normalisation the two hash
+# differently, and the owner is locked out by a password that looks correct on
+# screen. See `normalize_password` in models.py.
+
+# "café1234", composed (é as U+00E9) and decomposed (e + combining acute).
+_PRECOMPOSED = "caf\u00e91234"
+_DECOMPOSED = "cafe\u03011234"
+
+
+def test_the_two_encodings_are_different_strings():
+    """Guards the premise: if these were equal the tests below prove nothing."""
+    assert _PRECOMPOSED != _DECOMPOSED
+    assert len(_PRECOMPOSED) == 8
+    assert len(_DECOMPOSED) == 9
+
+
+def test_login_accepts_the_other_encoding_of_the_same_password(client):
+    _register(client, email="cafe@example.com", password=_PRECOMPOSED)
+
+    resp = client.post(
+        "/auth/login", json={"email": "cafe@example.com", "password": _DECOMPOSED}
+    )
+
+    assert resp.status_code == 200
+
+
+def test_login_works_when_registration_used_the_decomposed_form(client):
+    """Normalisation has to apply on the way in as well as the way out."""
+    _register(client, email="cafe2@example.com", password=_DECOMPOSED)
+
+    resp = client.post(
+        "/auth/login", json={"email": "cafe2@example.com", "password": _PRECOMPOSED}
+    )
+
+    assert resp.status_code == 200
+
+
+def test_normalisation_does_not_fold_case(client):
+    """Normalising must not quietly make passwords case-insensitive."""
+    _register(client, email="nofold@example.com", password="Secret123")
+
+    assert client.post(
+        "/auth/login", json={"email": "nofold@example.com", "password": "secret123"}
+    ).status_code == 401
+    assert client.post(
+        "/auth/login", json={"email": "nofold@example.com", "password": "Secret123"}
+    ).status_code == 200
+
+
+def test_decomposed_password_is_measured_after_normalising(client):
+    """9 raw characters, 8 after normalising: the rule applies to the 8."""
+    resp = _register(client, email="len@example.com", password=_DECOMPOSED)
+
+    assert resp.status_code == 201
+
+
+def test_compatibility_folding_makes_a_superscript_count_as_its_digit(client):
+    """NFKC turns '²' into '2', so it satisfies the digit rule as a real digit."""
+    resp = _register(client, email="sup@example.com", password="password\u00b2")
+
+    assert resp.status_code == 201
+    # And the folded form is what was stored, so the plain digit logs in too.
+    assert client.post(
+        "/auth/login", json={"email": "sup@example.com", "password": "password2"}
+    ).status_code == 200
+
+
+def test_non_ascii_letters_are_accepted(client):
+    """CJK characters count as letters, so this is 8 characters with a digit."""
+    password = "\u5bc6\u7801\u5bc6\u78011234"
+    assert len(password) == 8
+
+    resp = _register(client, email="cjk@example.com", password=password)
+
+    assert resp.status_code == 201
+
+
+# ---------------------------------------------------------------------------
+# Maximum password length
+# ---------------------------------------------------------------------------
+
+
+def test_register_rejects_password_over_maximum_length(client, app):
+    too_long = "a1" + ("x" * app.config["PASSWORD_MAX_LENGTH"])
+
+    resp = _register(client, password=too_long)
+
+    assert resp.status_code == 400
+    body = resp.get_json()
+    assert body["code"] == "weak_password"
+    assert str(app.config["PASSWORD_MAX_LENGTH"]) in body["message"]
+
+
+def test_register_accepts_password_at_exactly_maximum_length(client, app):
+    maximum = app.config["PASSWORD_MAX_LENGTH"]
+    exact = "a1" + ("x" * (maximum - 2))
+    assert len(exact) == maximum
+
+    resp = _register(client, password=exact)
+
+    assert resp.status_code == 201
+
+
+def test_maximum_is_measured_after_normalising(client, app):
+    """A decomposed password that shrinks under the limit is accepted."""
+    maximum = app.config["PASSWORD_MAX_LENGTH"]
+    # One combining pair per two characters, so the raw string is longer than
+    # the limit while the normalised form lands exactly on it.
+    over_the_raw_limit = "a1" + ("e\u0301" * (maximum - 2))
+    assert len(over_the_raw_limit) > maximum
+
+    resp = _register(client, password=over_the_raw_limit)
+
+    # Normalises to `maximum` characters, so length is fine.
+    assert resp.status_code == 201
+
+
+def test_long_password_still_fits_the_hash_column(client, app):
+    """The stored hash is fixed-width, so the column is not what bounds input."""
+    from extensions import db
+    from models import User
+
+    maximum = app.config["PASSWORD_MAX_LENGTH"]
+    created = _register(
+        client, email="longpw@example.com", password="a1" + ("x" * (maximum - 2))
+    )
+    assert created.status_code == 201
+
+    user = db.session.get(User, created.get_json()["id"])
+    assert len(user.password_hash) <= 255

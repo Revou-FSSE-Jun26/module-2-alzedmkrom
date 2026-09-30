@@ -156,6 +156,20 @@ class Config:
     # exact bytes it is given and compares hashes, never the text.
     PASSWORD_MIN_LENGTH = _positive_int_env("PASSWORD_MIN_LENGTH", 8)
 
+    # Upper bound, so the accepted input is finite rather than whatever fits in
+    # a request body.
+    #
+    # Note that this is not dictated by `users.password_hash` being
+    # VARCHAR(255): that column holds the hash, which PBKDF2 emits at a fixed
+    # ~162 characters no matter how long the password was. The bound is for
+    # tidiness, not to fit the column. It is also well clear of the 64
+    # characters NIST SP 800-63B asks verifiers to permit, so it rules out
+    # nothing a person would plausibly choose.
+    #
+    # Measured against the *normalised* password (see `normalize_password` in
+    # models.py), since that is the string actually hashed.
+    PASSWORD_MAX_LENGTH = _positive_int_env("PASSWORD_MAX_LENGTH", 255)
+
     # -- Rate limiting ------------------------------------------------------
     # Keys below starting with RATELIMIT_ are read by Flask-Limiter itself.
     #

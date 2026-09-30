@@ -33,7 +33,8 @@ RevoShop is the backend for a small online store. It manages a catalog of **prod
 - **Immediate logout via database-backed revocation** — revoked tokens are recorded in `token_blocklist` and refused for the rest of their lifetime, rather than staying valid until they expire. Stored in the database, not in memory, so revocation holds across gunicorn workers and redeploys.
 - **Role-based authorization** — catalog reads are public, orders are scoped to the authenticated user, and product/category writes plus order status changes are admin-only. Roles are re-read from the database per request, so a demotion or deactivation takes effect immediately instead of when the token expires. `POST /users` refuses to honor a self-assigned `role`.
 - **CORS** — an explicit, environment-configured origin allowlist, so a browser frontend on another origin can call the API.
-- **Password policy** — registration requires at least 8 characters including a letter and a digit. Case is not mandated but is preserved, so passwords stay case-sensitive. Enforced at sign-up only, so older accounts are not locked out.
+- **Password policy** — registration requires 8 to 255 characters including a letter and a digit. Case is not mandated but is preserved, so passwords stay case-sensitive. Enforced at sign-up only, so older accounts are not locked out.
+- **Unicode-safe passwords** — passwords are NFKC-normalised before hashing and verifying, so a password containing non-ASCII characters keeps working whichever keyboard or OS types it, instead of failing on an encoding difference the user cannot see.
 - **Rate limiting** — per-IP caps, tightest on `POST /auth/login`, which is what makes password guessing impractical. Exceeding one returns a JSON `429` with `Retry-After`, and `X-RateLimit-*` headers report the remaining budget.
 - **Many-to-many between orders and products through `order_items`** — each order line stores its own `quantity` and the `unit_price` captured at order time, so an order is a faithful record of what was actually charged. `flask link-order-products` demonstrates one order linked to multiple products.
 - **Data validation** — every write endpoint validates required fields, types, ranges, and lengths, returning `400`/`422` with a clear message on bad input, and `409` on conflicts (duplicate category/user, delete blocked by references).
@@ -65,7 +66,7 @@ RevoShop is the backend for a small online store. It manages a catalog of **prod
 - `schema.sql`, `seed.sql`, `queries.sql` — Checkpoint 1 database design, sample data, and verification queries. Unchanged by this checkpoint.
 - `config.py` — the `Config` class (database URIs, `SECRET_KEY`, CORS origins, JWT lifetimes, admin role name, password policy, rate limits).
 - `extensions.py` — the module-level `app`, `db = SQLAlchemy(app)`, `migrate = Migrate(app, db)`, `cors`, `jwt = JWTManager(app)`, and `limiter` (plus the `ProxyFix` that recovers the real client IP behind a platform proxy).
-- `models.py` — `User`, `Category`, `Product`, `Order`, `TokenBlocklist`, and the `order_items` association table.
+- `models.py` — `User`, `Category`, `Product`, `Order`, `TokenBlocklist`, the `order_items` association table, and `normalize_password` (the NFKC normalisation both `set_password` and `check_password` apply).
 - `routes.py` — `home_bp`, `products_bp`, `categories_bp`, `orders_bp`, and `users_bp` (which also carries the `/auth/*` endpoints), all database-backed.
 - `errors.py` — JSON error handlers for 400/404/405/429/500.
 - `auth.py` — the JWT callbacks (identity, user lookup, revocation check, JSON failure responses) and the `admin_required` / owner-or-admin guards used by `routes.py`.
@@ -336,11 +337,11 @@ Full set of codes: `authorization_required`, `token_expired`, `token_revoked`, `
 
 `POST /users` requires a password that is:
 
-- at least **8 characters** (`PASSWORD_MIN_LENGTH`)
+- between **8** and **255 characters** (`PASSWORD_MIN_LENGTH` / `PASSWORD_MAX_LENGTH`)
 - containing at least **one letter**
 - containing at least **one digit**
 
-No uppercase character is required. Passwords are nonetheless **fully case-sensitive**: nothing is lowercased anywhere, `User.set_password` hands the exact string to Werkzeug, and verification compares hashes rather than text, so `secret1` and `Secret1` are different passwords.
+No uppercase character is required. Passwords are nonetheless **fully case-sensitive**: nothing is lowercased anywhere, and normalisation does not fold case, so `secret1` and `Secret1` are different passwords.
 
 A rejection names the single rule that failed, with `"code": "weak_password"`:
 
@@ -350,7 +351,18 @@ A rejection names the single rule that failed, with `"code": "weak_password"`:
   "code": "weak_password" }
 ```
 
-Length is counted on the raw string, since a space is a legitimate password character. Whitespace-only passwords still fail, on the letter and digit rules.
+Whitespace is not stripped before counting, since a space is a legitimate password character. Whitespace-only passwords still fail, on the letter and digit rules.
+
+The maximum is a tidiness bound, not a constraint from the `password_hash` column: that column stores the hash, which PBKDF2 emits at a fixed ~162 characters however long the password was. 255 is well clear of the 64 characters [NIST SP 800-63B asks verifiers to permit](https://github.com/usnistgov/800-63-3/blob/nist-pages/sp800-63b/sec5_authenticators.md).
+
+**Unicode passwords are normalised (NFKC) before hashing and before verifying.** Non-ASCII characters are accepted, and normalising is what makes them reliable rather than a trap. The same visible character frequently has more than one valid encoding — `é` is either one code point or two, `e` plus a combining accent — which are different strings underneath while being indistinguishable on screen. Hash one spelling and compare the other and verification fails, so without normalising, whether login works depends on the keyboard, operating system, or paste buffer the password arrived through, and nothing in the response could explain the failure.
+
+Two consequences worth knowing:
+
+- Length is measured **after** normalising, since that is the string that gets hashed. `café1234` typed as `e`+accent is 9 characters raw and 8 normalised, and the 8 is what counts.
+- NFKC also applies compatibility folding, which is mildly lossy: `²` becomes `2`, full-width `ｐ` becomes `p`. So `password²` satisfies the digit rule as a genuine `2`, and two passwords that look different can normalise to the same one. That is the intended trade — a slightly smaller password space for a password that keeps working wherever it is typed.
+
+**Login never re-checks the policy.** Accounts created before it existed have working passwords that would not satisfy it, and re-checking at sign-in would lock them out of their own accounts rather than prompting anyone to pick something better.
 
 **Login never re-checks the policy.** Accounts created before it existed have working passwords that would not satisfy it, and re-checking at sign-in would lock them out of their own accounts rather than prompting anyone to pick something better.
 
