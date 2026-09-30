@@ -159,16 +159,18 @@ class Config:
     # Upper bound, so the accepted input is finite rather than whatever fits in
     # a request body.
     #
-    # Note that this is not dictated by `users.password_hash` being
-    # VARCHAR(255): that column holds the hash, which Werkzeug's scrypt emits
-    # at a fixed 162 characters no matter how long the password was. The bound
-    # is for tidiness, not to fit the column. It is also well clear of the 64
-    # characters NIST SP 800-63B asks verifiers to permit, so it rules out
-    # nothing a person would plausibly choose.
+    # 64 is the figure NIST SP 800-63B asks verifiers to permit *at least*, so
+    # this is the tightest defensible ceiling rather than a generous one. It
+    # still accommodates a four- or five-word passphrase, which is the longest
+    # thing most people type by hand.
+    #
+    # Nothing about the database forces this number: `users.password_hash` is
+    # VARCHAR(255), but it holds the hash, which Werkzeug's scrypt emits at a
+    # fixed 162 characters however long the password was.
     #
     # Measured against the *normalised* password (see `normalize_password` in
     # models.py), since that is the string actually hashed.
-    PASSWORD_MAX_LENGTH = _positive_int_env("PASSWORD_MAX_LENGTH", 255)
+    PASSWORD_MAX_LENGTH = _positive_int_env("PASSWORD_MAX_LENGTH", 64)
 
     # -- Rate limiting ------------------------------------------------------
     # Keys below starting with RATELIMIT_ are read by Flask-Limiter itself.

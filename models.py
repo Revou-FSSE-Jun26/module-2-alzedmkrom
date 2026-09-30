@@ -11,6 +11,7 @@ without a string lookup.
 
 import unicodedata
 
+from flask import current_app
 from sqlalchemy import func, text
 from werkzeug.security import check_password_hash, generate_password_hash
 
@@ -43,6 +44,56 @@ def normalize_password(raw_password: str) -> str:
     lives here next to them rather than in the route.
     """
     return unicodedata.normalize("NFKC", raw_password)
+
+
+def password_policy_error(password):
+    """Return why `password` is unacceptable, or None if it passes.
+
+    The rule is a length between `PASSWORD_MIN_LENGTH` and
+    `PASSWORD_MAX_LENGTH`, plus at least one letter and at least one digit. No
+    uppercase character is required.
+
+    Three deliberate choices:
+
+    * **Everything is measured on the normalised password**, which is what
+      `set_password` will actually hash. Validating the raw input instead would
+      let the two encodings of one visible password disagree about whether they
+      satisfy the rules.
+    * **Length is not measured on a stripped string**, because a space is a
+      perfectly good password character and silently not counting it would make
+      the limit a lie. An all-whitespace password still fails, on the letter and
+      digit rules.
+    * **Case is not part of the rule, but passwords stay case-sensitive.**
+      Nothing here lowercases anything, and normalisation does not fold case,
+      so `secret1` and `Secret1` remain different passwords.
+
+    Each failure names the one rule that was broken rather than reciting the
+    whole policy, so a caller fixing a short password is not also told about
+    digits it already has.
+
+    Lives here, beside `set_password` and `normalize_password`, because both
+    `POST /users` and the `set-password` CLI command have to apply the same
+    rule — a password the CLI accepts but the API would have rejected is a
+    difference nobody wants to debug later.
+
+    Not applied when *verifying* a password. Accounts created before the policy
+    existed have working passwords that would not satisfy it, and re-checking at
+    sign-in would lock them out of their own accounts rather than prompting
+    anyone to choose something better.
+    """
+    password = normalize_password(password)
+
+    minimum = current_app.config["PASSWORD_MIN_LENGTH"]
+    maximum = current_app.config["PASSWORD_MAX_LENGTH"]
+    if len(password) < minimum:
+        return f"Password must be at least {minimum} characters long."
+    if len(password) > maximum:
+        return f"Password must be {maximum} characters or fewer."
+    if not any(character.isalpha() for character in password):
+        return "Password must contain at least one letter."
+    if not any(character.isdigit() for character in password):
+        return "Password must contain at least one number."
+    return None
 
 # ---------------------------------------------------------------------------
 # Association table: orders <-> products (many-to-many with payload columns)

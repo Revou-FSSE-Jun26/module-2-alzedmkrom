@@ -28,7 +28,14 @@ from auth import (
     revoke_token,
 )
 from extensions import db, limiter
-from models import Category, Order, Product, User, normalize_password, order_items
+from models import (
+    Category,
+    Order,
+    Product,
+    User,
+    order_items,
+    password_policy_error,
+)
 
 home_bp = Blueprint("home", __name__)
 users_bp = Blueprint("users", __name__)
@@ -75,9 +82,9 @@ def register_user():
       3. Require a non-empty `email`; a missing or blank value returns 400
          naming `email`.
       4. Require a non-empty `password` that satisfies
-         `_password_policy_error` (minimum length, at least one letter, at
-         least one digit); a missing, blank, or weak value returns 400, the
-         last with `"code": "weak_password"`.
+         `password_policy_error` (length bounds, at least one letter, at least
+         one digit); a missing, blank, or weak value returns 400, the last
+         with `"code": "weak_password"`.
       5. `role` is **only honored for an authenticated admin caller**. See
          the note below.
       6. Case-insensitive duplicate pre-check on `username`/`email`; a match
@@ -164,7 +171,7 @@ def register_user():
             400,
         )
 
-    policy_error = _password_policy_error(password)
+    policy_error = password_policy_error(password)
     if policy_error is not None:
         return (
             jsonify(
@@ -544,54 +551,6 @@ def get_user(user_id):
         )
 
     return jsonify(user.to_dict())
-
-
-def _password_policy_error(password):
-    """Return why `password` is unacceptable, or None if it passes.
-
-    The rule is a length between `PASSWORD_MIN_LENGTH` (default 8) and
-    `PASSWORD_MAX_LENGTH` (default 255), plus at least one letter and at least
-    one digit. No uppercase character is required.
-
-    Three deliberate choices:
-
-    * **Everything is measured on the Unicode-normalised password**, which is
-      what actually gets hashed. Validating the raw input instead would let
-      the two encodings of the same visible password disagree about whether
-      they satisfy the rules.
-    * **Length is not measured on a stripped string**, because a space is a
-      perfectly good password character and silently not counting it would
-      make the limit a lie. An all-whitespace password still fails, on the
-      letter and digit rules.
-    * **Case is not part of the rule, but passwords stay case-sensitive.**
-      Nothing here lowercases anything, and normalisation does not fold case,
-      so `secret1` and `Secret1` remain different passwords.
-
-    Each failure names the one rule that was broken rather than reciting the
-    whole policy, so a caller fixing a short password is not also told about
-    digits it already has.
-
-    Applied by `register_user` only. Login must never call this: accounts
-    created before the policy existed have working passwords that would not
-    satisfy it, and re-checking at login would lock them out of their own
-    accounts rather than prompting anyone to choose a better one.
-    """
-    # Checked against the normalised form, because that is the string
-    # `set_password` will hash. Measuring the raw input instead would let a
-    # decomposed password fail a length rule that its stored form satisfies.
-    password = normalize_password(password)
-
-    minimum = current_app.config["PASSWORD_MIN_LENGTH"]
-    maximum = current_app.config["PASSWORD_MAX_LENGTH"]
-    if len(password) < minimum:
-        return f"Password must be at least {minimum} characters long."
-    if len(password) > maximum:
-        return f"Password must be {maximum} characters or fewer."
-    if not any(character.isalpha() for character in password):
-        return "Password must contain at least one letter."
-    if not any(character.isdigit() for character in password):
-        return "Password must contain at least one number."
-    return None
 
 
 _PRODUCT_REQUIRED_FIELDS = ("category_id", "name", "price", "stock_quantity")

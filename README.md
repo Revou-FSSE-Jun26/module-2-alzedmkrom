@@ -70,7 +70,7 @@ RevoShop is the backend for a small online store. It manages a catalog of **prod
 - `routes.py` — `home_bp`, `products_bp`, `categories_bp`, `orders_bp`, and `users_bp` (which also carries the `/auth/*` endpoints), all database-backed.
 - `errors.py` — JSON error handlers for 400/404/405/429/500.
 - `auth.py` — the JWT callbacks (identity, user lookup, revocation check, JSON failure responses) and the `admin_required` / owner-or-admin guards used by `routes.py`.
-- `cli.py` — `flask check-db` and `flask link-order-products`.
+- `cli.py` — `flask check-db`, `flask set-password`, and `flask link-order-products`.
 - `locustfile.py` — Locust load test simulating a shopper journey (list products, view one, place an order, view that order).
 - `app.py` — entry point; registers blueprints and runs the dev server.
 - `migrations/` — the Flask-Migrate environment and revision history.
@@ -337,7 +337,7 @@ Full set of codes: `authorization_required`, `token_expired`, `token_revoked`, `
 
 `POST /users` requires a password that is:
 
-- between **8** and **255 characters** (`PASSWORD_MIN_LENGTH` / `PASSWORD_MAX_LENGTH`)
+- between **8** and **64 characters** (`PASSWORD_MIN_LENGTH` / `PASSWORD_MAX_LENGTH`)
 - containing at least **one letter**
 - containing at least **one digit**
 
@@ -353,7 +353,7 @@ A rejection names the single rule that failed, with `"code": "weak_password"`:
 
 Whitespace is not stripped before counting, since a space is a legitimate password character. Whitespace-only passwords still fail, on the letter and digit rules.
 
-The maximum is a tidiness bound, not a constraint from the `password_hash` column: that column stores the hash, which is a fixed 162 characters however long the password was. 255 is well clear of the 64 characters [NIST SP 800-63B asks verifiers to permit](https://github.com/usnistgov/800-63-3/blob/nist-pages/sp800-63b/sec5_authenticators.md).
+64 is the figure [NIST SP 800-63B asks verifiers to permit *at least*](https://github.com/usnistgov/800-63-3/blob/nist-pages/sp800-63b/sec5_authenticators.md), so the ceiling is the tightest defensible one rather than a generous one; it still fits a four- or five-word passphrase. Nothing about the database forces it: `users.password_hash` is `VARCHAR(255)`, but it stores the hash, which is a fixed 162 characters however long the password was.
 
 Hashing itself is Werkzeug's default, currently **scrypt** (`scrypt:32768:8:1` — a memory-hard function, deliberately expensive to attack in bulk). The algorithm and its parameters are recorded in the stored string, so Werkzeug can still verify older hashes if that default changes later.
 
@@ -413,7 +413,8 @@ Role is re-read from the database on every request rather than trusted from the 
 
 - Tokens are read from the `Authorization` header only. Cookies are deliberately not enabled: the API is called cross-origin by a browser frontend, and cookie-based JWT would need CSRF protection as well.
 - Revocations live in the `token_blocklist` table, not in memory, because gunicorn runs multiple workers (a token revoked in one would still be accepted by the others) and a redeploy would otherwise silently un-revoke everything.
-- Accounts created by `seed.sql` **cannot log in**: it stores placeholder strings such as `hash_budi_001` in `password_hash` rather than real Werkzeug hashes. Register through `POST /users` to get a usable account.
+- Accounts created by `seed.sql` **cannot log in**: it stores placeholder strings such as `hash_budi_001` in `password_hash` rather than real hashes, so they reject every password. Either register a fresh account through `POST /users`, or give a seeded one a working password with [`flask set-password`](#flask-set-password) — worth doing for at least one, since the seeded accounts are the ones that own the sample order history.
+- Password hashing is Werkzeug's default, currently **scrypt** (`scrypt:32768:8:1`). The algorithm and its parameters are stored alongside each hash, so existing hashes keep verifying if that default changes.
 
 ## Endpoints
 
@@ -1221,6 +1222,41 @@ Connection OK.
 ```
 
 If the connection fails, the command prints the masked target URI, the error type and message with the password scrubbed, a hint to confirm PostgreSQL is running and the database exists, and exits with a non-zero status.
+
+### `flask set-password`
+
+Sets the password, and optionally the role, of an existing account. Covers the two things the API deliberately cannot do.
+
+**Giving a seeded account a working password.** `seed.sql` fills `users.password_hash` with placeholder strings such as `hash_budi_001` rather than real hashes, so every seeded account rejects every password — there is no value that logs in. That matters as soon as you need a test account with real order history to look at:
+
+```sh
+flask set-password budi@mail.com
+```
+
+**Creating the first administrator.** `POST /users` ignores a caller-supplied `role` unless the request already carries an admin token, which means the first admin cannot be made over HTTP — deliberately, since otherwise anyone could. This breaks the circle from somewhere already trusted, a shell holding database credentials:
+
+```sh
+flask set-password you@example.com --role ADMIN
+```
+
+The password is prompted for, hidden and confirmed, and never echoed:
+
+```
+New password for budi@mail.com:
+Repeat for confirmation:
+Password set for budi@mail.com (id 1).
+  This account previously had no usable password hash, so it could not log in at all. It can now.
+```
+
+Options:
+
+| Option | Effect |
+| --- | --- |
+| `--password` | Skip the prompt. Avoid where possible — an argument lands in shell history and is visible to anything listing processes. |
+| `--role` | Also set the role, e.g. `--role ADMIN`. Left untouched if omitted. |
+| `--allow-weak` | Skip the [password policy](#password-policy) check, for reproducing a specific value in local testing. |
+
+The policy is applied by default, so a password set here is one the API would also have accepted — a command that could create a password `POST /users` rejects would be a difference nobody wants to debug later. Lookup by email is case-insensitive, and an unknown address exits non-zero and lists the addresses that do exist (a convenience local to a trusted shell; no endpoint exposes anything comparable).
 
 ### `flask link-order-products`
 
