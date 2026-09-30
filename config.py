@@ -160,9 +160,9 @@ class Config:
     # a request body.
     #
     # Note that this is not dictated by `users.password_hash` being
-    # VARCHAR(255): that column holds the hash, which PBKDF2 emits at a fixed
-    # ~162 characters no matter how long the password was. The bound is for
-    # tidiness, not to fit the column. It is also well clear of the 64
+    # VARCHAR(255): that column holds the hash, which Werkzeug's scrypt emits
+    # at a fixed 162 characters no matter how long the password was. The bound
+    # is for tidiness, not to fit the column. It is also well clear of the 64
     # characters NIST SP 800-63B asks verifiers to permit, so it rules out
     # nothing a person would plausibly choose.
     #

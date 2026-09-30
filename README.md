@@ -353,7 +353,9 @@ A rejection names the single rule that failed, with `"code": "weak_password"`:
 
 Whitespace is not stripped before counting, since a space is a legitimate password character. Whitespace-only passwords still fail, on the letter and digit rules.
 
-The maximum is a tidiness bound, not a constraint from the `password_hash` column: that column stores the hash, which PBKDF2 emits at a fixed ~162 characters however long the password was. 255 is well clear of the 64 characters [NIST SP 800-63B asks verifiers to permit](https://github.com/usnistgov/800-63-3/blob/nist-pages/sp800-63b/sec5_authenticators.md).
+The maximum is a tidiness bound, not a constraint from the `password_hash` column: that column stores the hash, which is a fixed 162 characters however long the password was. 255 is well clear of the 64 characters [NIST SP 800-63B asks verifiers to permit](https://github.com/usnistgov/800-63-3/blob/nist-pages/sp800-63b/sec5_authenticators.md).
+
+Hashing itself is Werkzeug's default, currently **scrypt** (`scrypt:32768:8:1` — a memory-hard function, deliberately expensive to attack in bulk). The algorithm and its parameters are recorded in the stored string, so Werkzeug can still verify older hashes if that default changes later.
 
 **Unicode passwords are normalised (NFKC) before hashing and before verifying.** Non-ASCII characters are accepted, and normalising is what makes them reliable rather than a trap. The same visible character frequently has more than one valid encoding — `é` is either one code point or two, `e` plus a combining accent — which are different strings underneath while being indistinguishable on screen. Hash one spelling and compare the other and verification fails, so without normalising, whether login works depends on the keyboard, operating system, or paste buffer the password arrived through, and nothing in the response could explain the failure.
 
