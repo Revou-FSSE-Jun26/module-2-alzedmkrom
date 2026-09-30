@@ -393,7 +393,15 @@ Two behaviours worth knowing:
 - **Failed attempts count**, and once the limit trips even the *correct* password is refused until the window passes. Otherwise an attacker's final successful guess would still be rewarded.
 - `429` and `401` are distinguishable by `code`, so a frontend can say "too many attempts, wait a moment" rather than "wrong password" for something that is not a password problem.
 
-**Honest limitations of the default setup.** Counters live in each worker's memory (`RATELIMIT_STORAGE_URI=memory://`), which means gunicorn's several workers each keep their own, so the effective limit is roughly the configured one times the worker count; and a restart or redeploy clears them. That is weaker than it looks, though it still turns unlimited guessing into a trickle. Point `RATELIMIT_STORAGE_URI` at Redis to make the limits exact.
+**Honest limitations of the default setup.** Counters live in each worker's memory (`RATELIMIT_STORAGE_URI=memory://`), so every gunicorn worker keeps its own tally and a restart or redeploy clears them all.
+
+The effective limit is therefore the configured one multiplied by the worker count, and that is not a theoretical concern. Measured against this project's own Railway deployment: the configured 10-per-minute login limit first refused an attempt on the **21st** try, and `X-RateLimit-Remaining` came back out of order across consecutive requests (`299, 299, 298, 298, 297, 296, 297, …`) — two independent counters, so twice the intended allowance.
+
+Twenty guesses a minute is still a world away from unlimited, but it is not what the configuration says. Point `RATELIMIT_STORAGE_URI` at a shared store to make the limits exact:
+
+```
+RATELIMIT_STORAGE_URI=redis://default:password@host:6379
+```
 
 `TRUSTED_PROXY_COUNT` must match the deployment or limiting misfires: too low and every request appears to come from the platform proxy, so one user's failed logins throttle everybody; too high and a client can forge an `X-Forwarded-For` entry for a fresh quota per request. `1` is correct behind Railway; use `0` with no proxy.
 
