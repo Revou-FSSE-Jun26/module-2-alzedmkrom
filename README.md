@@ -42,7 +42,7 @@ RevoShop is the backend for a small online store. It manages a catalog of **prod
 - **Stock management** — placing an order decrements product stock (and rejects an order that exceeds available stock); cancelling/returning/refunding an order restores it.
 - **Soft delete for orders** — `DELETE /orders/<id>` sets `is_delete = true` instead of removing the row, so financial/order history is never destroyed.
 - **Automated tests** — a `pytest` suite (`tests/`) covers all Category CRUD endpoints plus users, products, and orders, on happy-path and error cases, against an isolated test database.
-- **Load testing** — a `locustfile.py` simulates a concurrent shopper journey (browse → view → order → view order) against a dedicated `revoshop_test` database.
+- **Load testing** — a `locustfile.py` simulates a concurrent shopper journey (log in → browse → view → order → view order → refresh token), run against a throwaway database.
 
 ## Technologies Used
 
@@ -125,16 +125,24 @@ There are two environment files:
   cp .env.example .env
   ```
 
-  `config.py` calls `load_dotenv()` on import, so every value below comes from `.env` (or the real shell/host environment in production, which `python-dotenv` never overrides). There is no hardcoded fallback for any of them: a missing `.env` fails loudly at startup with a `KeyError` instead of silently connecting to the wrong database.
+  `config.py` calls `load_dotenv()` on import, so every value below comes from `.env` (or the real shell/host environment in production, which `python-dotenv` never overrides). `DATABASE_URL` and `SECRET_KEY` have no hardcoded fallback: a missing `.env` fails loudly at startup with a `KeyError` instead of silently connecting to the wrong database. Everything else is optional and documented with its default in `.env.example`.
 
-  - **`DATABASE_URL`** — the PostgreSQL connection string for `revoshop_db`, in `postgresql://user:password@host/dbname` form. Edit this to point at a different user, password, host, or database name.
-  - **`SECRET_KEY`** — used by Flask for session signing. Generate a value with:
+  **Required:**
+
+  - **`DATABASE_URL`** — PostgreSQL connection string, in `postgresql://user:password@host/dbname` form. Any PostgreSQL will do: a local instance, or a hosted one such as Supabase (this project's own deployment uses Supabase — see `.env.example` for the pooler details that setup needs).
+  - **`SECRET_KEY`** — used by Flask for session signing, and as the fallback signing key for JWTs. Generate a value with:
 
     ```sh
     python -c "import secrets; print(secrets.token_hex(32))"
     ```
 
-  - **`FLASK_DEBUG`** — `true` to enable Flask's debug mode (auto-reload, interactive debugger) when running via `python app.py`. Set to `false` outside local development. (`flask run` reads its own `FLASK_DEBUG` from `.flaskenv` instead, independently of this one.)
+  **Optional, with sensible defaults:**
+
+  - **`FLASK_DEBUG`** — `true` to enable Flask's debug mode (auto-reload, interactive debugger) when running via `python app.py`. **Must be `false` on a deployed host**: Flask ties `PROPAGATE_EXCEPTIONS` to `DEBUG`, so with debug on an unhandled error bypasses the JSON handlers in `errors.py` and the client gets the WSGI server's HTML error page, which a frontend calling `response.json()` cannot parse. (`flask run` reads its own `FLASK_DEBUG` from `.flaskenv` instead, independently of this one.)
+  - **`DIRECT_URL`** — a separate connection string used only by migrations, needed when `DATABASE_URL` points at a connection pooler that cannot run DDL transactions. Falls back to `DATABASE_URL`.
+  - **`CORS_ORIGINS`** — origins allowed to call the API from a browser. Defaults to the usual local frontend dev servers.
+  - **`JWT_SECRET_KEY`**, **`JWT_ACCESS_MINUTES`**, **`JWT_REFRESH_MINUTES`**, **`ADMIN_ROLE`** — see [Authentication](#authentication).
+  - **`PASSWORD_MIN_LENGTH`**, **`RATELIMIT_*`**, **`TRUSTED_PROXY_COUNT`** — see [Password policy](#password-policy) and [Rate limiting](#rate-limiting).
 
 ### 4. Confirm the database is reachable
 
@@ -1245,14 +1253,29 @@ An expired access token on `POST /orders` is the one failure treated as recovera
 
 The Flask server must already be running (`flask run` or `python app.py`) before starting Locust; `locustfile.py` sends real HTTP requests to it, it does not import or call the app in-process.
 
-**Use a dedicated test database** so Locust orders and stock changes never touch your main `revoshop_db` data, and **turn rate limiting off**, since all the simulated users share one IP and the limiter would otherwise treat them as a single abusive client — registration would cap out after a handful of users and the rest of the journey would never get a token. Set both before starting the server (see `.env.example` for one-time database setup):
+Two things have to be set on the server before a run:
+
+**1. Point `DATABASE_URL` at a throwaway database.** A run commits real orders, deducts real stock, registers one account per simulated user, and writes a `token_blocklist` row per refresh. None of that is reverted afterwards. Any database you are willing to lose will do — a second local Postgres, a separate Supabase project, whatever you have — as long as it is not the one holding data you care about.
+
+**Apply the migrations to it first**, or the run fails in a confusing way:
+
+```sh
+flask db upgrade
+```
+
+Every authenticated request reads `token_blocklist`, so against a database missing that table (added in revision `56e0d1e07c3f`) login and refresh answer `500` and the journey never gets a token.
+
+**2. Turn rate limiting off.** All the simulated users come from one IP, so the limiter sees a single client making hundreds of requests a second. Leave it on and registration caps out after a handful of users and the rest never authenticate — the run measures nothing but `429`s.
 
 ```powershell
 # PowerShell — overrides apply to this terminal session only
-$env:DATABASE_URL="postgresql://postgres:your_password@localhost/revoshop_test"
+$env:DATABASE_URL="<your throwaway database URL>"
 $env:RATELIMIT_ENABLED="false"
+flask db upgrade
 flask run
 ```
+
+A local Postgres is worth preferring over a hosted one here: network latency to a remote database lands in every measurement, so the numbers end up describing the connection more than the application.
 
 Then in a second terminal, start Locust:
 
@@ -1271,17 +1294,19 @@ locust -f locustfile.py --host=http://127.0.0.1:5000 \
 
 ### After a run
 
-Because Locust hits `revoshop_test`, your main `revoshop_db` is completely unaffected. A run now also leaves behind one `users` row per simulated user and one `token_blocklist` row per refresh, on top of the orders. To clean up for the next run:
+A run leaves four kinds of row behind in whichever database it hit: orders and their line items, one account per simulated user, and a `token_blocklist` row per refresh. Stock is left wherever the orders pushed it, which for a long run is often zero. To reset for the next run, connected to that database:
 
 ```sql
--- in psql or pgAdmin, connected to revoshop_test
 TRUNCATE order_items, orders RESTART IDENTITY CASCADE;
 DELETE FROM token_blocklist;
 DELETE FROM users WHERE username LIKE 'locust\_%';
-UPDATE products SET stock_quantity = seed_value, is_delete = false;
+-- then restore stock, e.g.
+UPDATE products SET stock_quantity = 50, is_delete = false;
 ```
 
-Or simply drop and re-create `revoshop_test` from scratch — it only has seed data (no real user orders), so nothing important is lost.
+Dropping and re-creating the database works too, as long as you remember the two steps that follow: `flask db upgrade` to rebuild the schema, and re-seeding products, since `GET /products` returning an empty list fails the first step of the journey.
+
+Note that `DELETE FROM users` only removes the accounts this file created (`locust_…`); the `ON DELETE CASCADE` on `token_blocklist.user_id` clears their tokens either way.
 
 ## Screenshots
 
