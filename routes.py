@@ -555,6 +555,29 @@ def get_user(user_id):
 
 _PRODUCT_REQUIRED_FIELDS = ("category_id", "name", "price", "stock_quantity")
 
+# Upper bound on the `?search=` term (see `list_products`). Long enough for any
+# real query, short enough that a pathological pattern cannot be handed to the
+# database.
+_SEARCH_MAX_LENGTH = 255
+
+
+def _escape_like(term):
+    """Neutralise LIKE wildcards in `term` so it matches literally.
+
+    `%` and `_` are wildcards inside a LIKE pattern, so a search term
+    containing them would otherwise mean something the user did not type:
+    `?search=%` matches every row, and `?search=a_c` matches "abc". The
+    backslash is escaped first, since it is the escape character itself and
+    doing it later would corrupt the escapes just added.
+
+    Callers must pass ``escape="\\\\"`` to `like()` for these to take effect.
+    """
+    return (
+        term.replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+
 
 @products_bp.route("", methods=["POST"])
 @admin_required
@@ -765,21 +788,96 @@ def create_product():
 def list_products():
     """Return products, ordered by id. Public: no token required.
 
-    Soft-deleted products (`is_delete = True`) are excluded by default,
-    matching a real storefront (a soft-deleted product should not keep
-    showing up for sale). `?include_deleted=true` also lists them, for an
-    admin view that needs to find and restore one — and is therefore honored
-    only for an admin caller. Anyone else passing it gets the normal public
-    listing rather than a 403, since it is a display preference, not an
-    action being refused.
+    Query parameters, all optional and combined with AND:
+
+    ``search``
+        Case-insensitive partial match against `name` **or** `description`,
+        for a storefront search box. `?search=watch` matches "Smart Watch"
+        and a product only mentioning a watch in its description.
+
+    ``category_id``
+        Restrict to one category, for a category filter. Must be a positive
+        integer or the request returns 400. An id no category has yields an
+        empty list rather than 404: this is a filter over a collection, and
+        "no products matched" is a legitimate answer, unlike asking for a
+        specific missing resource.
+
+    ``include_deleted``
+        Soft-deleted products (`is_delete = True`) are excluded by default,
+        matching a real storefront — a soft-deleted product should not keep
+        showing up for sale. `?include_deleted=true` also lists them, for an
+        admin view that needs to find and restore one, and is therefore
+        honored only for an admin caller. Anyone else passing it gets the
+        normal public listing rather than a 403, since it is a display
+        preference, not an action being refused.
+
+    Matching is done with `lower(column) LIKE lower(pattern)` rather than
+    `ILIKE`, because `ILIKE` is PostgreSQL-only and the test suite runs on
+    SQLite. Lowering both sides also removes a subtler trap: plain `LIKE` is
+    case-sensitive on PostgreSQL but case-insensitive on SQLite, so without it
+    the same query would behave differently in tests than in production.
     """
     query = db.session.query(Product)
+
     wants_deleted = request.args.get("include_deleted", "").strip().lower() in (
         "true",
         "1",
     )
     if not (wants_deleted and is_admin(current_user)):
         query = query.filter(Product.is_delete.is_(False))
+
+    raw_category_id = request.args.get("category_id")
+    if raw_category_id is not None:
+        raw_category_id = raw_category_id.strip()
+        # A blank `?category_id=` means "no category selected", matching how a
+        # blank `?search=` is handled below. A frontend that always appends its
+        # filter parameters sends exactly this when the dropdown is cleared, and
+        # answering 400 there would break the page rather than show everything.
+        # A non-empty value that is not a positive integer is still an error,
+        # since that is a genuine bug worth surfacing rather than ignoring.
+        if raw_category_id:
+            if not raw_category_id.isdigit() or int(raw_category_id) < 1:
+                return (
+                    jsonify(
+                        {
+                            "error": "Bad Request",
+                            "message": (
+                                "Query parameter 'category_id' must be a "
+                                "positive integer."
+                            ),
+                        }
+                    ),
+                    400,
+                )
+            query = query.filter(Product.category_id == int(raw_category_id))
+
+    search = request.args.get("search")
+    if search is not None:
+        search = search.strip()
+        if len(search) > _SEARCH_MAX_LENGTH:
+            return (
+                jsonify(
+                    {
+                        "error": "Bad Request",
+                        "message": (
+                            f"Query parameter 'search' must be "
+                            f"{_SEARCH_MAX_LENGTH} characters or fewer."
+                        ),
+                    }
+                ),
+                400,
+            )
+        # A blank `?search=` is treated as "no search" rather than as a match
+        # on the empty string, so clearing a search box does not have to mean
+        # dropping the parameter.
+        if search:
+            pattern = f"%{_escape_like(search.lower())}%"
+            query = query.filter(
+                or_(
+                    func.lower(Product.name).like(pattern, escape="\\"),
+                    func.lower(Product.description).like(pattern, escape="\\"),
+                )
+            )
 
     products = query.order_by(Product.id).all()
     return jsonify([product.to_dict() for product in products])

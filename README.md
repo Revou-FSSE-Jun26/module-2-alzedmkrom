@@ -25,6 +25,7 @@ RevoShop is the backend for a small online store. It manages a catalog of **prod
 ## Features Implemented
 
 - **Full CRUD for products** — create, list, retrieve, update, and delete (`POST`/`GET`/`GET <id>`/`PUT`/`DELETE /products`).
+- **Product search and category filtering** — `GET /products?search=` matches names and descriptions case-insensitively, `?category_id=` narrows to one category, and the two combine. LIKE wildcards in a search term are escaped so they match literally.
 - **Full CRUD for categories** — create, list, retrieve (with the category's products), update, and delete (`/categories`).
 - **Full CRUD for orders** — place an order, list a user's orders, retrieve one order with its line items and product details, update status, and delete (`/orders`).
 - **User registration and retrieval** — `POST /users`, `GET /users/<id>`. Passwords are hashed with Werkzeug and never returned.
@@ -515,15 +516,32 @@ Response — `400 Bad Request`:
 
 ### GET /products
 
-Returns products, ordered by `id`, via `Product.to_dict()`. Soft-deleted
-products (`is_delete: true`) are excluded by default, matching a real
-storefront. Pass `?include_deleted=true` to also list them.
+Returns products, ordered by `id`, via `Product.to_dict()`. Public: no token required.
+
+All query parameters are optional, and combine with AND:
+
+| Parameter | Effect |
+| --- | --- |
+| `search` | Case-insensitive partial match against `name` **or** `description`. `?search=watch` finds "Smart Watch" and a product that only mentions a watch in its description. |
+| `category_id` | Restrict to one category. Must be a positive integer, or the request returns `400`. |
+| `include_deleted` | Also list soft-deleted products (`is_delete: true`), which are otherwise excluded — a soft-deleted product should not keep showing up for sale. Honored only for an admin caller; anyone else gets the normal public listing rather than a `403`, since it is a display preference, not an action being refused. |
 
 Request:
 
 ```sh
 curl http://127.0.0.1:5000/products
+curl "http://127.0.0.1:5000/products?search=jacket"
+curl "http://127.0.0.1:5000/products?category_id=3"
+curl "http://127.0.0.1:5000/products?search=watch&category_id=3"
 ```
+
+Details a frontend will run into:
+
+- **A blank value means "no filter".** `?search=` and `?category_id=` both return the full listing, so clearing a search box or a category dropdown does not require dropping the parameter from the URL.
+- **A non-empty, non-numeric `category_id` is a `400`**, including the `undefined` and `null` that a JavaScript template string produces from a missing value. That is a real bug on the caller's side and is surfaced rather than silently ignored.
+- **A filter matching nothing returns `200` with `[]`**, not `404` — including an unknown `category_id`. This is a filter over a collection, where "no products matched" is a legitimate answer, unlike requesting one missing resource by id.
+- **`%` and `_` in a search term are literal.** They are LIKE wildcards underneath and are escaped, so `?search=%` returns no matches instead of everything.
+- Search terms over 255 characters return `400`.
 
 Response — `200 OK`:
 
