@@ -28,13 +28,13 @@ RevoShop is the backend for a small online store. It manages a catalog of **prod
 - **Product search and category filtering** — `GET /products?search=` matches names and descriptions case-insensitively, `?category_id=` narrows to one category, and the two combine. LIKE wildcards in a search term are escaped so they match literally.
 - **Full CRUD for categories** — create, list, retrieve (with the category's products), update, and delete (`/categories`).
 - **Full CRUD for orders** — place an order, list a user's orders, retrieve one order with its line items and product details, update status, and delete (`/orders`).
-- **User registration and retrieval** — `POST /users`, `GET /users/<id>`. Passwords are hashed with Werkzeug and never returned.
+- **User registration and retrieval** — `POST /register`, `GET /users/<id>`. Passwords are hashed with Werkzeug and never returned.
 - **JWT authentication** — `POST /auth/login`, `POST /auth/refresh`, `POST /auth/logout`, `GET /auth/me`. Short-lived access tokens with longer-lived refresh tokens, and every failure carrying a machine-readable `code` so a client can tell "refresh and retry" from "log out". See [Authentication](#authentication).
 - **Refresh-token rotation with an idle session timeout** — each refresh revokes the token it consumed and issues a new pair, so an active session slides forward while an idle one expires and forces a fresh login (the auto-logout).
 - **Immediate logout via database-backed revocation** — revoked tokens are recorded in `token_blocklist` and refused for the rest of their lifetime, rather than staying valid until they expire. Stored in the database, not in memory, so revocation holds across gunicorn workers and redeploys.
-- **Role-based authorization** — catalog reads are public, orders are scoped to the authenticated user, and product/category writes plus order status changes are admin-only. Roles are re-read from the database per request, so a demotion or deactivation takes effect immediately instead of when the token expires. `POST /users` refuses to honor a self-assigned `role`.
+- **Role-based authorization** — catalog reads are public, orders are scoped to the authenticated user, and product/category writes plus order status changes are admin-only. Roles are re-read from the database per request, so a demotion or deactivation takes effect immediately instead of when the token expires. `POST /register` refuses to honor a self-assigned `role`.
 - **CORS** — an explicit, environment-configured origin allowlist, so a browser frontend on another origin can call the API.
-- **Password policy** — registration requires 8 to 255 characters including a letter and a digit. Case is not mandated but is preserved, so passwords stay case-sensitive. Enforced at sign-up only, so older accounts are not locked out.
+- **Password policy** — registration requires 8 to 64 characters including a letter and a digit. Case is not mandated but is preserved, so passwords stay case-sensitive. Enforced at sign-up only, so older accounts are not locked out.
 - **Unicode-safe passwords** — passwords are NFKC-normalised before hashing and verifying, so a password containing non-ASCII characters keeps working whichever keyboard or OS types it, instead of failing on an encoding difference the user cannot see.
 - **Rate limiting** — per-IP caps, tightest on `POST /auth/login`, which is what makes password guessing impractical. Exceeding one returns a JSON `429` with `Retry-After`, and `X-RateLimit-*` headers report the remaining budget.
 - **Many-to-many between orders and products through `order_items`** — each order line stores its own `quantity` and the `unit_price` captured at order time, so an order is a faithful record of what was actually charged. `flask link-order-products` demonstrates one order linked to multiple products.
@@ -243,7 +243,7 @@ After any `flask db upgrade`, run:
 flask check-db
 ```
 
-and confirm the row counts read 10 / 4 / 10 / 30 / 56 (a fresh Checkpoint 1 seed inserts 54 order_items; the two extra come from `flask link-order-products`, which extends order 4 for the many-to-many demonstration). The `users` count may read higher than 10 if `POST /users` has been exercised since seeding, and `orders`/`order_items` may read higher after local API or Locust testing; that is expected and does not indicate data loss, since the original seeded rows are still present. Re-running `queries.sql` in a database client should still return no rows from its integrity checks.
+and confirm the row counts read 10 / 4 / 10 / 30 / 56 (a fresh Checkpoint 1 seed inserts 54 order_items; the two extra come from `flask link-order-products`, which extends order 4 for the many-to-many demonstration). The `users` count may read higher than 10 if `POST /register` has been exercised since seeding, and `orders`/`order_items` may read higher after local API or Locust testing; that is expected and does not indicate data loss, since the original seeded rows are still present. Re-running `queries.sql` in a database client should still return no rows from its integrity checks.
 
 ## Authentication
 
@@ -257,7 +257,7 @@ Authorization: Bearer <access_token>
 
 | Access | Endpoints |
 | --- | --- |
-| **Public** (no token) | `GET /`, `POST /users`, `POST /auth/login`, `GET /products`, `GET /products/<id>`, `GET /categories`, `GET /categories/<id>` |
+| **Public** (no token) | `GET /`, `POST /register`, `POST /auth/login`, `GET /products`, `GET /products/<id>`, `GET /categories`, `GET /categories/<id>` |
 | **Any logged-in user** | `GET /auth/me`, `POST /auth/refresh`, `POST /auth/logout`, `GET /users/<id>` (self), `POST /orders`, `GET /orders`, `GET /orders/<id>` (own), `DELETE /orders/<id>` (own) |
 | **Admin only** (`role = 'ADMIN'`) | `POST`/`PUT`/`DELETE /products`, `POST`/`PUT`/`DELETE /categories`, `PUT /orders/<id>`, plus any other user's orders and `GET /users/<id>` for any id |
 
@@ -301,6 +301,8 @@ Both are then rejected for the rest of their natural lifetime. Sending the refre
 
 **`GET /auth/me`** — the account behind the access token. Useful for restoring a session on page reload, and the cheapest way to ask "is my token still good?".
 
+Registration itself sits at **`POST /register`** (documented [below](#post-register)). It was previously `POST /users`, which no longer exists — a call there now returns `404`. Only registration moved; `GET /users/<id>` keeps its resource-shaped path, since reading an account by id genuinely is a resource lookup.
+
 ### Session timeout and auto-logout
 
 Two timers, with different meanings:
@@ -336,7 +338,7 @@ Full set of codes: `authorization_required`, `token_expired`, `token_revoked`, `
 
 ### Password policy
 
-`POST /users` requires a password that is:
+`POST /register` requires a password that is:
 
 - between **8** and **64 characters** (`PASSWORD_MIN_LENGTH` / `PASSWORD_MAX_LENGTH`)
 - containing at least **one letter**
@@ -376,7 +378,7 @@ Requests are capped per client IP. This is the companion to the password policy 
 | Endpoint | Default limit | Why |
 | --- | --- | --- |
 | `POST /auth/login` | 10/min, 100/hour | Tightest in the app: no credentials needed to start guessing. |
-| `POST /users` | 5/min, 30/hour | Stops a script filling the users table. |
+| `POST /register` | 5/min, 30/hour | Stops a script filling the users table. |
 | `POST /auth/refresh` | 60/min | A real client refreshes rarely, and each call writes a `token_blocklist` row. |
 | everything else | 300/min | Backstop against a runaway client; browsing stays comfortable. |
 
@@ -410,7 +412,7 @@ RATELIMIT_STORAGE_URI=redis://default:password@host:6379
 
 ### Roles
 
-`users.role` defaults to `'CUSTOMER'`. `POST /users` **ignores** a caller-supplied `role` unless the request already carries an admin token — otherwise anyone could mint themselves an admin account with one unauthenticated request. The first admin therefore has to be promoted directly in the database:
+`users.role` defaults to `'CUSTOMER'`. `POST /register` **ignores** a caller-supplied `role` unless the request already carries an admin token — otherwise anyone could mint themselves an admin account with one unauthenticated request. The first admin therefore has to be promoted directly in the database:
 
 ```sql
 UPDATE users SET role = 'ADMIN' WHERE email = 'you@example.com';
@@ -422,7 +424,7 @@ Role is re-read from the database on every request rather than trusted from the 
 
 - Tokens are read from the `Authorization` header only. Cookies are deliberately not enabled: the API is called cross-origin by a browser frontend, and cookie-based JWT would need CSRF protection as well.
 - Revocations live in the `token_blocklist` table, not in memory, because gunicorn runs multiple workers (a token revoked in one would still be accepted by the others) and a redeploy would otherwise silently un-revoke everything.
-- Accounts created by `seed.sql` **cannot log in**: it stores placeholder strings such as `hash_budi_001` in `password_hash` rather than real hashes, so they reject every password. Either register a fresh account through `POST /users`, or give a seeded one a working password with [`flask set-password`](#flask-set-password) — worth doing for at least one, since the seeded accounts are the ones that own the sample order history.
+- Accounts created by `seed.sql` **cannot log in**: it stores placeholder strings such as `hash_budi_001` in `password_hash` rather than real hashes, so they reject every password. Either register a fresh account through `POST /register`, or give a seeded one a working password with [`flask set-password`](#flask-set-password) — worth doing for at least one, since the seeded accounts are the ones that own the sample order history.
 - Password hashing is Werkzeug's default, currently **scrypt** (`scrypt:32768:8:1`). The algorithm and its parameters are stored alongside each hash, so existing hashes keep verifying if that default changes.
 
 ## Endpoints
@@ -979,7 +981,7 @@ Response — `200 OK`:
 { "message": "Order 31 deleted successfully." }
 ```
 
-### POST /users
+### POST /register
 
 Creates a new user account. Public: no token required. Validates the body, checks for a case-insensitive duplicate on `username`/`email`, hashes the password with Werkzeug, and persists the row.
 
@@ -992,7 +994,7 @@ Rate limited to 5 per minute and 30 per hour per IP.
 Request (success):
 
 ```sh
-curl -X POST http://127.0.0.1:5000/users \
+curl -X POST http://127.0.0.1:5000/register \
   -H "Content-Type: application/json" \
   -d '{"username": "newshopper", "email": "newshopper@example.com", "password": "shopper2026"}'
 ```
@@ -1013,7 +1015,7 @@ Response — `201 Created` (no `password_hash` in the body):
 Request (missing/blank fields):
 
 ```sh
-curl -X POST http://127.0.0.1:5000/users \
+curl -X POST http://127.0.0.1:5000/register \
   -H "Content-Type: application/json" \
   -d '{"username": "", "email": "newshopper@example.com"}'
 ```
@@ -1030,7 +1032,7 @@ Response — `400 Bad Request`:
 Request (password too weak):
 
 ```sh
-curl -X POST http://127.0.0.1:5000/users \
+curl -X POST http://127.0.0.1:5000/register \
   -H "Content-Type: application/json" \
   -d '{"username": "newshopper", "email": "newshopper@example.com", "password": "letters"}'
 ```
@@ -1048,7 +1050,7 @@ Response — `400 Bad Request`, naming the one rule that failed:
 Request (missing/invalid JSON body):
 
 ```sh
-curl -X POST http://127.0.0.1:5000/users
+curl -X POST http://127.0.0.1:5000/register
 ```
 
 Response — `400 Bad Request`:
@@ -1063,7 +1065,7 @@ Response — `400 Bad Request`:
 Request (duplicate username or email):
 
 ```sh
-curl -X POST http://127.0.0.1:5000/users \
+curl -X POST http://127.0.0.1:5000/register \
   -H "Content-Type: application/json" \
   -d '{"username": "newshopper", "email": "someone-else@example.com", "password": "another-password"}'
 ```
@@ -1119,7 +1121,7 @@ Response — `404 Not Found`:
 
 Authenticates a user by `email` and `password` and returns an access/refresh token pair. Requires both fields in the body. See [Authentication](#authentication) for the full token lifecycle; this section covers the request/response shape.
 
-Note that accounts created by `seed.sql` cannot log in — it stores placeholder strings such as `hash_budi_001` in `password_hash` rather than real Werkzeug hashes. Register through `POST /users` first.
+Note that accounts created by `seed.sql` cannot log in — it stores placeholder strings such as `hash_budi_001` in `password_hash` rather than real Werkzeug hashes. Register through `POST /register` first.
 
 ```sh
 curl -X POST http://127.0.0.1:5000/auth/login \
@@ -1259,7 +1261,7 @@ Sets the password, and optionally the role, of an existing account. Covers the t
 flask set-password budi@mail.com
 ```
 
-**Creating the first administrator.** `POST /users` ignores a caller-supplied `role` unless the request already carries an admin token, which means the first admin cannot be made over HTTP — deliberately, since otherwise anyone could. This breaks the circle from somewhere already trusted, a shell holding database credentials:
+**Creating the first administrator.** `POST /register` ignores a caller-supplied `role` unless the request already carries an admin token, which means the first admin cannot be made over HTTP — deliberately, since otherwise anyone could. This breaks the circle from somewhere already trusted, a shell holding database credentials:
 
 ```sh
 flask set-password you@example.com --role ADMIN
@@ -1282,7 +1284,7 @@ Options:
 | `--role` | Also set the role, e.g. `--role ADMIN`. Left untouched if omitted. |
 | `--allow-weak` | Skip the [password policy](#password-policy) check, for reproducing a specific value in local testing. |
 
-The policy is applied by default, so a password set here is one the API would also have accepted — a command that could create a password `POST /users` rejects would be a difference nobody wants to debug later. Lookup by email is case-insensitive, and an unknown address exits non-zero and lists the addresses that do exist (a convenience local to a trusted shell; no endpoint exposes anything comparable).
+The policy is applied by default, so a password set here is one the API would also have accepted — a command that could create a password `POST /register` rejects would be a difference nobody wants to debug later. Lookup by email is case-insensitive, and an unknown address exits non-zero and lists the addresses that do exist (a convenience local to a trusted shell; no endpoint exposes anything comparable).
 
 ### `flask link-order-products`
 
@@ -1307,7 +1309,7 @@ Running the command again reports the same total and the same three products, si
 
 **Once per simulated user:**
 
-0. `POST /users` then `POST /auth/login` — register a throwaway account and obtain an access/refresh token pair.
+0. `POST /register` then `POST /auth/login` — register a throwaway account and obtain an access/refresh token pair.
 
 **Then, on a loop:**
 
@@ -1321,7 +1323,7 @@ Each user registers its own account rather than reusing a seeded one, because ac
 
 The refresh step is included deliberately. Rotation writes a row to `token_blocklist`, and every authenticated request reads that table, so the refresh path has a database cost that belongs in the measurements rather than being assumed cheap.
 
-The Statistics table groups per-id requests under the fixed labels `/products/[id]` and `/orders/[id]` (via Locust's `name=` parameter) rather than one row per distinct id, so a run's results fit in a handful of rows: `/users (register)`, `/auth/login`, `GET /products`, `/products/[id]`, `POST /orders`, `/orders/[id]`, and `/auth/refresh`.
+The Statistics table groups per-id requests under the fixed labels `/products/[id]` and `/orders/[id]` (via Locust's `name=` parameter) rather than one row per distinct id, so a run's results fit in a handful of rows: `/register`, `/auth/login`, `GET /products`, `/products/[id]`, `POST /orders`, `/orders/[id]`, and `/auth/refresh`.
 
 An expired access token on `POST /orders` is the one failure treated as recoverable: the journey refreshes and carries on, rather than counting the server as broken. Every other non-201 — including a 400 from insufficient stock — is recorded as a failure, so stock depletion shows up in the numbers instead of being hidden.
 
@@ -1409,7 +1411,7 @@ Each HTTP method is exercised against the local server:
 - Create product — ![POST /products](images/POST_products.jpg)
 - Create category — ![POST /categories](images/POST_categories.jpg)
 - Create order — ![POST /orders](images/POST_orders.jpg)
-- Register user — ![POST /users](images/POST_user.jpg)
+- Register user — ![POST /register](images/POST_user.jpg)
 - Login — ![POST /auth/login](images/POST_auth_login.jpg)
 
 **PUT**

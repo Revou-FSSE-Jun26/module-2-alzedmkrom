@@ -68,11 +68,16 @@ def index():
 # User routes: database-backed
 # ---------------------------------------------------------------------------
 
-@users_bp.route("/users", methods=["POST"])
+@users_bp.route("/register", methods=["POST"])
 @limiter.limit(lambda: current_app.config["RATELIMIT_REGISTER"])
 @jwt_required(optional=True)
 def register_user():
     """Create a new user account.
+
+    Lives at `/register` rather than `POST /users`, so that the action a
+    visitor performs reads as one, next to `/auth/login` and `/auth/logout`.
+    `GET /users/<id>` keeps its resource-shaped path, since reading an account
+    by id genuinely is a resource lookup.
 
     Validation sequence (design.md, Requirement 5):
       1. Parse the body with `request.get_json(silent=True)`; a missing or

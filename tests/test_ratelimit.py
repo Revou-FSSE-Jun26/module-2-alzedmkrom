@@ -134,7 +134,7 @@ def test_budget_is_reported_in_headers(client, app, account, rate_limited):
 
 
 # ---------------------------------------------------------------------------
-# POST /users
+# POST /register
 # ---------------------------------------------------------------------------
 
 
@@ -145,7 +145,7 @@ def test_registration_is_rate_limited(client, app, rate_limited):
     created = 0
     for index in range(2):
         resp = client.post(
-            "/users",
+            "/register",
             json={
                 "username": f"spam{index}",
                 "email": f"spam{index}@example.com",
@@ -157,7 +157,7 @@ def test_registration_is_rate_limited(client, app, rate_limited):
         created += 1
 
     blocked = client.post(
-        "/users",
+        "/register",
         json={
             "username": "spam99",
             "email": "spam99@example.com",

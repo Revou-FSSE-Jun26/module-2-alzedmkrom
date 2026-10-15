@@ -145,7 +145,7 @@ class Config:
     ADMIN_ROLE = os.environ.get("ADMIN_ROLE", "ADMIN").strip() or "ADMIN"
 
     # -- Password policy ----------------------------------------------------
-    # Enforced by `POST /users` only (see `_password_policy_error` in
+    # Enforced by `POST /register` only (see `_password_policy_error` in
     # routes.py). Login deliberately does not re-check the policy: accounts
     # created before it existed would otherwise be locked out of their own
     # working passwords.

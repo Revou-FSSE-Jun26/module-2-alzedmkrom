@@ -72,7 +72,7 @@ def password_policy_error(password):
     digits it already has.
 
     Lives here, beside `set_password` and `normalize_password`, because both
-    `POST /users` and the `set-password` CLI command have to apply the same
+    `POST /register` and the `set-password` CLI command have to apply the same
     rule — a password the CLI accepts but the API would have rejected is a
     difference nobody wants to debug later.
 

@@ -193,14 +193,14 @@ def set_password(email, password, role, allow_weak):
     cannot log in at all: seed.sql fills users.password_hash with placeholder
     strings like 'hash_budi_001' rather than real hashes, so every seeded
     account rejects every password. Second, creating the first administrator:
-    POST /users ignores a caller-supplied role unless the request already
+    POST /register ignores a caller-supplied role unless the request already
     carries an admin token, so the first admin cannot be made over HTTP, and
     --role breaks that circle from a shell that already holds database
     credentials.
 
     The password is prompted for, hidden and confirmed, unless --password is
     given. It is never echoed; only the fact that it changed is reported. The
-    policy POST /users enforces is applied here too, so a password set by this
+    policy POST /register enforces is applied here too, so a password set by this
     command is one the API would also have accepted.
 
     \b

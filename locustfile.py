@@ -1,7 +1,7 @@
 """Locust load test for RevoShop.
 
 Simulates a sequential shopper journey against a running server:
-  1. POST /users + POST /auth/login   once per simulated user, in on_start
+  1. POST /register + POST /auth/login  once per simulated user, in on_start
   2. GET  /products                   list all products (public)
   3. GET  /products/<id>              fetch a single product from that list
   4. POST /orders                     place an order  (requires access token)
@@ -210,10 +210,10 @@ class RevoShopUser(HttpUser):
             "password": GENERATED_PASSWORD,
         }
         with self.client.post(
-            "/users", json=body, name="/users (register)", catch_response=True
+            "/register", json=body, name="/register", catch_response=True
         ) as resp:
             if resp.status_code != 201:
-                resp.failure(f"POST /users returned {resp.status_code}")
+                resp.failure(f"POST /register returned {resp.status_code}")
                 return None, None
         return email, GENERATED_PASSWORD
 

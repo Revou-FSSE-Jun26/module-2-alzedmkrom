@@ -12,7 +12,7 @@ def _register(client, username="alice", email="alice@example.com", password="hun
     body = {"username": username, "email": email, "password": password}
     if role is not None:
         body["role"] = role
-    return client.post("/users", json=body)
+    return client.post("/register", json=body)
 
 
 # ---------------------------------------------------------------------------
@@ -55,7 +55,7 @@ def test_register_user_ignores_role_for_customer_caller(customer_client):
 
 
 def test_register_user_missing_body_error(client):
-    resp = client.post("/users", data="not json", content_type="text/plain")
+    resp = client.post("/register", data="not json", content_type="text/plain")
 
     assert resp.status_code == 400
     assert resp.get_json()["error"] == "Bad Request"
@@ -496,3 +496,46 @@ def test_long_password_still_fits_the_hash_column(client, app):
 
     user = db.session.get(User, created.get_json()["id"])
     assert len(user.password_hash) <= 255
+
+
+# ---------------------------------------------------------------------------
+# The registration path
+# ---------------------------------------------------------------------------
+
+
+def test_registration_lives_at_register(client):
+    """Pins the path, so a rename cannot happen silently again."""
+    resp = client.post(
+        "/register",
+        json={
+            "username": "pathcheck",
+            "email": "pathcheck@example.com",
+            "password": "pathcheck1",
+        },
+    )
+
+    assert resp.status_code == 201
+
+
+def test_post_users_is_no_longer_a_route(client):
+    """`POST /users` used to be registration; it is gone, not silently ignored."""
+    resp = client.post(
+        "/users",
+        json={
+            "username": "old",
+            "email": "old@example.com",
+            "password": "oldpath123",
+        },
+    )
+
+    assert resp.status_code in {404, 405}
+    # Still the project's JSON envelope, not a Werkzeug HTML page.
+    assert "application/json" in resp.headers.get("Content-Type", "")
+
+
+def test_reading_a_user_by_id_kept_its_resource_path(customer_client, customer_user):
+    """Only registration moved; `GET /users/<id>` is unchanged."""
+    resp = customer_client.get(f"/users/{customer_user}")
+
+    assert resp.status_code == 200
+    assert resp.get_json()["id"] == customer_user
