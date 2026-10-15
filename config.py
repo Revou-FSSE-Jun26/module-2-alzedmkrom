@@ -145,8 +145,9 @@ class Config:
     ADMIN_ROLE = os.environ.get("ADMIN_ROLE", "ADMIN").strip() or "ADMIN"
 
     # -- Password policy ----------------------------------------------------
-    # Enforced by `POST /register` only (see `_password_policy_error` in
-    # routes.py). Login deliberately does not re-check the policy: accounts
+    # Applied wherever a password is set — `POST /register` and the
+    # `set-password` CLI command — through `password_policy_error` in
+    # models.py. Verifying a password deliberately does not re-check: accounts
     # created before it existed would otherwise be locked out of their own
     # working passwords.
     #

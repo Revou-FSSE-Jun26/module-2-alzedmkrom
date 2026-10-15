@@ -234,10 +234,10 @@ def test_get_user_unknown_id_is_forbidden_not_found_for_customer(customer_client
 # Password policy on POST /users
 # ---------------------------------------------------------------------------
 #
-# The rule: at least 8 characters, at least one letter, at least one digit.
+# The rule: 8 to 64 characters, at least one letter, at least one digit.
 # No uppercase character is required, but passwords stay case-sensitive.
-# Enforced on registration only — see `_password_policy_error` in routes.py
-# for why login must not re-check it.
+# Applied when a password is set, never when one is verified — see
+# `password_policy_error` in models.py for why.
 
 
 def test_register_rejects_password_under_minimum_length(client):
