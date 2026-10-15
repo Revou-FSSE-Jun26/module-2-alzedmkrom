@@ -1685,54 +1685,91 @@ def create_order():
 @orders_bp.route("", methods=["GET"])
 @jwt_required()
 def list_orders():
-    """Return the authenticated user's orders, ordered by id.
+    """Return orders, ordered by id. Scope depends on who is asking.
 
     `user_id` used to be a required query parameter, because there was no
     authentication and the caller had to say who they were. It is now taken
-    from the access token, so `GET /orders` returns your own orders and
-    nothing else — a customer cannot read someone else's order history by
-    changing the number.
+    from the access token, so by default `GET /orders` returns your own
+    orders and nothing else — a customer cannot read someone else's order
+    history by changing the number.
 
-    An admin may still pass `?user_id=<id>` to read a specific customer's
-    orders; for any other caller that parameter is refused with 403 rather
-    than quietly ignored, since silently returning your own orders when you
-    asked for someone else's would be misleading.
+    Scoping, in order of precedence:
+
+    ``?all=true`` (admin only)
+        Every user's orders, across all accounts, for an admin dashboard.
+        Each order already carries its `user_id` (see `Order.to_dict`), so
+        the caller can tell whose is whose. A non-admin passing it is refused
+        with 403 rather than quietly downgraded to their own orders, since
+        silently returning something narrower than asked for is misleading.
+
+    ``?user_id=<id>`` (admin, or that user)
+        One specific user's orders. Anyone other than that user or an admin
+        gets 403.
+
+    neither
+        The caller's own orders.
+
+    `?all=true` wins if both are supplied, since it is the broader request and
+    pairing them is contradictory rather than meaningful.
 
     Soft-deleted orders (`is_delete = True`) are excluded by default. Pass
     `?include_deleted=true` to also list them.
     """
-    user_id = current_user.id
+    query = db.session.query(Order)
 
-    raw_user_id = request.args.get("user_id")
-    if raw_user_id is not None:
-        if not raw_user_id.isdigit():
+    wants_all = request.args.get("all", "").strip().lower() in ("true", "1")
+    if wants_all:
+        # Admin-only, and deliberately checked before `user_id` so that
+        # `?all=true&user_id=...` does not read as a per-user request.
+        if not is_admin(current_user):
             return (
                 jsonify(
                     {
-                        "error": "Bad Request",
-                        "message": "Query parameter 'user_id' must be a positive integer.",
+                        "error": "Forbidden",
+                        "message": (
+                            "Listing all users' orders requires administrator "
+                            "privileges."
+                        ),
+                        "code": "admin_required",
                     }
                 ),
-                400,
+                403,
             )
-        requested_id = int(raw_user_id)
-        forbidden = forbid_unless_self_or_admin(requested_id)
-        if forbidden is not None:
-            return forbidden
-        user_id = requested_id
+        # No user filter: every account's orders.
+    else:
+        user_id = current_user.id
 
-        if db.session.get(User, user_id) is None:
-            return (
-                jsonify(
-                    {
-                        "error": "Not Found",
-                        "message": f"User {user_id} was not found.",
-                    }
-                ),
-                404,
-            )
+        raw_user_id = request.args.get("user_id")
+        if raw_user_id is not None:
+            if not raw_user_id.isdigit():
+                return (
+                    jsonify(
+                        {
+                            "error": "Bad Request",
+                            "message": "Query parameter 'user_id' must be a positive integer.",
+                        }
+                    ),
+                    400,
+                )
+            requested_id = int(raw_user_id)
+            forbidden = forbid_unless_self_or_admin(requested_id)
+            if forbidden is not None:
+                return forbidden
+            user_id = requested_id
 
-    query = db.session.query(Order).filter(Order.user_id == user_id)
+            if db.session.get(User, user_id) is None:
+                return (
+                    jsonify(
+                        {
+                            "error": "Not Found",
+                            "message": f"User {user_id} was not found.",
+                        }
+                    ),
+                    404,
+                )
+
+        query = query.filter(Order.user_id == user_id)
+
     if request.args.get("include_deleted", "").strip().lower() not in ("true", "1"):
         query = query.filter(Order.is_delete.is_(False))
 

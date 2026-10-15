@@ -108,6 +108,91 @@ def test_list_orders_customer_cannot_read_another_users_orders(
     assert resp.get_json()["code"] == "forbidden"
 
 
+# -- ?all=true : every user's orders, admin only ----------------------------
+
+
+def test_admin_can_list_all_orders(
+    admin_client, admin_user, customer_client, customer_user,
+    authorized_client_for, make_user, app
+):
+    """?all=true returns orders across every account, not just the caller's."""
+    product_id = _create_product(app, stock_quantity=100)
+
+    # Orders from three different users.
+    o1 = _create_order(customer_client, product_id)
+
+    second_id = make_user(username="buyer2", email="buyer2@example.com")
+    second = authorized_client_for(second_id)
+    o2 = _create_order(second, product_id)
+
+    o3 = _create_order(admin_client, product_id)  # the admin's own order
+
+    resp = admin_client.get("/orders?all=true")
+
+    assert resp.status_code == 200
+    returned = resp.get_json()
+    ids = sorted(o["id"] for o in returned)
+    assert ids == sorted([o1["id"], o2["id"], o3["id"]])
+    # Orders belong to more than one user, which the per-user view could never
+    # return.
+    assert len({o["user_id"] for o in returned}) == 3
+
+
+def test_all_orders_is_forbidden_for_a_customer(customer_client):
+    resp = customer_client.get("/orders?all=true")
+
+    assert resp.status_code == 403
+    assert resp.get_json()["code"] == "admin_required"
+
+
+def test_all_orders_requires_a_token(client):
+    resp = client.get("/orders?all=true")
+
+    assert resp.status_code == 401
+
+
+def test_all_true_takes_precedence_over_user_id(
+    admin_client, customer_client, customer_user, authorized_client_for,
+    make_user, app
+):
+    """`?all=true&user_id=X` lists everyone, not just user X."""
+    product_id = _create_product(app, stock_quantity=100)
+    _create_order(customer_client, product_id)
+
+    second_id = make_user(username="buyer2", email="buyer2@example.com")
+    _create_order(authorized_client_for(second_id), product_id)
+
+    resp = admin_client.get(f"/orders?all=true&user_id={customer_user}")
+
+    assert resp.status_code == 200
+    assert len({o["user_id"] for o in resp.get_json()}) == 2
+
+
+def test_all_orders_excludes_soft_deleted_by_default(
+    admin_client, customer_client, app
+):
+    product_id = _create_product(app, stock_quantity=100)
+    created = _create_order(customer_client, product_id)
+    customer_client.delete(f"/orders/{created['id']}")
+
+    default_view = admin_client.get("/orders?all=true")
+    with_deleted = admin_client.get("/orders?all=true&include_deleted=true")
+
+    assert created["id"] not in [o["id"] for o in default_view.get_json()]
+    assert created["id"] in [o["id"] for o in with_deleted.get_json()]
+
+
+def test_all_false_is_the_normal_own_orders_view(admin_client, app):
+    """A falsy `all` is ignored, so the admin still sees only their own."""
+    product_id = _create_product(app, stock_quantity=100)
+    mine = _create_order(admin_client, product_id)
+
+    resp = admin_client.get("/orders?all=false")
+
+    assert resp.status_code == 200
+    assert [o["id"] for o in resp.get_json()] == [mine["id"]]
+
+
 # ---------------------------------------------------------------------------
 # GET /orders/<id>
 # ---------------------------------------------------------------------------

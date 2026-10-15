@@ -259,7 +259,7 @@ Authorization: Bearer <access_token>
 | --- | --- |
 | **Public** (no token) | `GET /`, `POST /register`, `POST /auth/login`, `GET /products`, `GET /products/<id>`, `GET /categories`, `GET /categories/<id>` |
 | **Any logged-in user** | `GET /auth/me`, `POST /auth/refresh`, `POST /auth/logout`, `GET /users/<id>` (self), `POST /orders`, `GET /orders`, `GET /orders/<id>` (own), `DELETE /orders/<id>` (own) |
-| **Admin only** (`role = 'ADMIN'`) | `POST`/`PUT`/`DELETE /products`, `POST`/`PUT`/`DELETE /categories`, `PUT /orders/<id>`, plus any other user's orders and `GET /users/<id>` for any id |
+| **Admin only** (`role = 'ADMIN'`) | `POST`/`PUT`/`DELETE /products`, `POST`/`PUT`/`DELETE /categories`, `PUT /orders/<id>`, `GET /orders?all=true` (every user's orders), plus any other user's orders and `GET /users/<id>` for any id |
 
 Two distinct refusals, and they mean different things:
 
@@ -899,13 +899,26 @@ Response — `400 Bad Request`:
 
 ### GET /orders
 
-Returns the **authenticated user's** orders, ordered by `id`. Requires an access token. `user_id` used to be a required query parameter; it is now taken from the token, so a customer cannot read someone else's history by changing a number.
+Returns orders, ordered by `id`. Requires an access token. What it returns depends on who asks and which parameter they pass:
 
-An admin may pass `?user_id=<id>` to read a specific customer's orders. Any other caller passing it gets 403 rather than a silent fallback to their own orders. Soft-deleted orders are excluded by default; pass `?include_deleted=true` to include them.
+| Request | Returns | Who |
+| --- | --- | --- |
+| `GET /orders` | the caller's own orders | any logged-in user |
+| `GET /orders?user_id=<id>` | that user's orders | the user themselves, or an admin |
+| `GET /orders?all=true` | **every user's orders**, across all accounts | admin only |
+
+`user_id` used to be a required parameter; it is now taken from the token, so a customer cannot read someone else's history by changing a number. A non-admin passing `?user_id=<other>` or `?all=true` gets `403`, not a silent fallback to their own orders.
+
+`?all=true` is the admin dashboard view. Each order carries its own `user_id`, so the admin can tell whose is whose. If both `all=true` and `user_id` are sent, `all=true` wins. Soft-deleted orders are excluded by default on every variant; pass `?include_deleted=true` to include them.
 
 ```sh
+# own orders
 curl "http://127.0.0.1:5000/orders" \
   -H "Authorization: Bearer $ACCESS_TOKEN"
+
+# admin: every user's orders
+curl "http://127.0.0.1:5000/orders?all=true" \
+  -H "Authorization: Bearer $ADMIN_ACCESS_TOKEN"
 ```
 
 Response — `200 OK`:
